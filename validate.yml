@@ -1,0 +1,256 @@
+---
+# roles/certificate/tasks/validate_ipa.yml
+#
+# Validates IPA client state and signed certificates on the IT server.
+# Runs via delegate_to — uses Ansible's existing SSH connection.
+# No pytest, no paramiko, no sshpass, nothing to install.
+#
+# Called from validate.yml after controller tests pass.
+
+
+# ── IPA enrollment ────────────────────────────────────────────────────────────
+
+- name: "[IPA] Check /etc/ipa/default.conf exists (IPA enrolled)"
+  ansible.builtin.stat:
+    path: /etc/ipa/default.conf
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: ipa_conf
+  failed_when: not ipa_conf.stat.exists
+
+
+- name: "[IPA] Check sssd is running"
+  ansible.builtin.command: systemctl is-active sssd
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: sssd_status
+  changed_when: false
+  failed_when: sssd_status.rc != 0
+
+
+- name: "[IPA] Check IPA server is reachable (ipa ping)"
+  ansible.builtin.command: ipa ping
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: ipa_ping
+  changed_when: false
+  failed_when: >
+    ipa_ping.rc != 0 or
+    'IPA server version' not in ipa_ping.stdout
+
+
+# ── Server CSR ────────────────────────────────────────────────────────────────
+
+- name: "[Server CSR] Check server.csr exists on IT server"
+  ansible.builtin.stat:
+    path: "{{ certificate_csr_path.server }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: server_csr_stat
+  failed_when: not server_csr_stat.stat.exists
+
+
+- name: "[Server CSR] Check server.csr is not empty"
+  ansible.builtin.fail:
+    msg: "Server CSR is empty: {{ certificate_csr_path.server }}"
+  when: server_csr_stat.stat.size == 0
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+
+
+- name: "[Server CSR] Verify server.csr signature is valid"
+  ansible.builtin.command:
+    cmd: "openssl req -noout -verify -in {{ certificate_csr_path.server }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: server_csr_verify
+  changed_when: false
+  failed_when: server_csr_verify.rc != 0
+
+
+# ── Client CSR ────────────────────────────────────────────────────────────────
+
+- name: "[Client CSR] Check client.csr exists on IT server"
+  ansible.builtin.stat:
+    path: "{{ certificate_csr_path.client }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: client_csr_stat
+  failed_when: not client_csr_stat.stat.exists
+
+
+- name: "[Client CSR] Check client.csr is not empty"
+  ansible.builtin.fail:
+    msg: "Client CSR is empty: {{ certificate_csr_path.client }}"
+  when: client_csr_stat.stat.size == 0
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+
+
+- name: "[Client CSR] Verify client.csr signature is valid"
+  ansible.builtin.command:
+    cmd: "openssl req -noout -verify -in {{ certificate_csr_path.client }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: client_csr_verify
+  changed_when: false
+  failed_when: client_csr_verify.rc != 0
+
+
+# ── Server signed certificate ─────────────────────────────────────────────────
+
+- name: "[Server CRT] Check server.crt exists on IT server"
+  ansible.builtin.stat:
+    path: "{{ certificate_signed_crt_path.server }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: server_crt_stat
+  failed_when: not server_crt_stat.stat.exists
+
+
+- name: "[Server CRT] Verify server.crt is valid X.509"
+  ansible.builtin.command:
+    cmd: "openssl x509 -noout -in {{ certificate_signed_crt_path.server }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: server_crt_valid
+  changed_when: false
+  failed_when: server_crt_valid.rc != 0
+
+
+- name: "[Server CRT] Get server.crt issuer"
+  ansible.builtin.command:
+    cmd: "openssl x509 -noout -issuer -in {{ certificate_signed_crt_path.server }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: server_crt_issuer
+  changed_when: false
+
+
+- name: "[Server CRT] Verify server.crt was issued by IPA CA"
+  ansible.builtin.fail:
+    msg: >
+      Server cert not issued by IPA CA.
+      Issuer: {{ server_crt_issuer.stdout }}
+  when: "'Certificate Authority' not in server_crt_issuer.stdout"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+
+
+- name: "[Server CRT] Check server.crt SANs match expected"
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -noout -ext subjectAltName
+      -in {{ certificate_signed_crt_path.server }}
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: server_crt_sans
+  changed_when: false
+  failed_when: >
+    server_crt_sans.rc != 0 or
+    certificate_sans | difference(
+      server_crt_sans.stdout.split('\n') |
+      map('trim') | select('match', '^DNS:') | list
+    ) | length > 0
+
+
+- name: "[Server CRT] Check server.crt is not expired"
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -noout -checkend 0
+      -in {{ certificate_signed_crt_path.server }}
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: server_crt_expiry
+  changed_when: false
+  failed_when: server_crt_expiry.rc != 0
+
+
+# ── Client signed certificate ─────────────────────────────────────────────────
+
+- name: "[Client CRT] Check client.crt exists on IT server"
+  ansible.builtin.stat:
+    path: "{{ certificate_signed_crt_path.client }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: client_crt_stat
+  failed_when: not client_crt_stat.stat.exists
+
+
+- name: "[Client CRT] Verify client.crt is valid X.509"
+  ansible.builtin.command:
+    cmd: "openssl x509 -noout -in {{ certificate_signed_crt_path.client }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: client_crt_valid
+  changed_when: false
+  failed_when: client_crt_valid.rc != 0
+
+
+- name: "[Client CRT] Get client.crt issuer"
+  ansible.builtin.command:
+    cmd: "openssl x509 -noout -issuer -in {{ certificate_signed_crt_path.client }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: client_crt_issuer
+  changed_when: false
+
+
+- name: "[Client CRT] Verify client.crt was issued by IPA CA"
+  ansible.builtin.fail:
+    msg: >
+      Client cert not issued by IPA CA.
+      Issuer: {{ client_crt_issuer.stdout }}
+  when: "'Certificate Authority' not in client_crt_issuer.stdout"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+
+
+- name: "[Client CRT] Check client.crt is not expired"
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -noout -checkend 0
+      -in {{ certificate_signed_crt_path.client }}
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: client_crt_expiry
+  changed_when: false
+  failed_when: client_crt_expiry.rc != 0
+
+
+# ── IPA CA database ───────────────────────────────────────────────────────────
+
+- name: "[IPA DB] Check IPA CA tracks the certificate"
+  ansible.builtin.command:
+    cmd: "ipa cert-find --subject={{ certificate_hostname }}"
+  delegate_to: "{{ groups['it_server'][0] }}"
+  run_once: true
+  register: ipa_cert_find
+  changed_when: false
+  failed_when: >
+    ipa_cert_find.rc != 0 or
+    certificate_hostname not in ipa_cert_find.stdout
+
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+- name: IPA client validation passed
+  ansible.builtin.debug:
+    msg:
+      - "IPA enrolled        : OK"
+      - "sssd running        : OK"
+      - "IPA ping            : OK"
+      - "Server CSR          : OK"
+      - "Server signed cert  : OK"
+      - "Client CSR          : OK"
+      - "Client signed cert  : OK"
+      - "IPA CA tracking     : OK"
+  delegate_to: localhost
+  run_once: true
+
+
+
+  # ── Step 2: IT server — pure Ansible tasks, no pytest needed ─────────────────
+ 
+- name: "Validate [2/2] IPA client and signed certs on IT server"
+  ansible.builtin.import_tasks: validate_ipa.yml
