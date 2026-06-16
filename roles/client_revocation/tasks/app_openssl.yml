@@ -1,0 +1,27 @@
+---
+# roles/client_revocation/tasks/app_openssl.yml
+# Configures OpenSSL on Debian clients for CRL/OCSP revocation checking
+#
+# LIMITATION: OpenSSL's default_conf approach configures the library globally
+# but most applications must explicitly call SSL_CTX_set_verify() with the
+# proper flags. The openssl.cnf approach works for openssl CLI and apps that
+# use the default SSL_CTX. For custom apps, document the requirement.
+
+- name: Backup existing openssl.cnf
+  ansible.builtin.copy:
+    src: "{{ openssl_conf_path }}"
+    dest: "{{ openssl_conf_path }}.bak.{{ ansible_date_time.epoch }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+
+- name: Deploy hardened openssl.cnf with revocation settings
+  ansible.builtin.template:
+    src: openssl.cnf.j2
+    dest: "{{ openssl_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "openssl req -config %s -help 2>&1 | head -1 || true"

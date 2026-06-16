@@ -1,0 +1,166 @@
+// jenkins/Jenkinsfile.renewal
+// Certificate Renewal Pipeline
+// Triggers automatically on schedule or manually for forced renewal
+
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'TARGET_HOST',
+            defaultValue: '',
+            description: 'Specific host to renew (empty = all cert_targets)'
+        )
+        string(
+            name: 'TARGET_STATION',
+            defaultValue: '',
+            description: 'Station to renew (e.g. station01). Overrides TARGET_HOST if set.'
+        )
+        booleanParam(
+            name: 'FORCE_RENEWAL',
+            defaultValue: false,
+            description: 'Force renewal regardless of expiry threshold'
+        )
+        string(
+            name: 'RENEWAL_THRESHOLD_DAYS',
+            defaultValue: '30',
+            description: 'Renew certificates expiring within this many days'
+        )
+        string(
+            name: 'INVENTORY',
+            defaultValue: 'inventories/production/hosts.yml',
+            description: 'Ansible inventory path'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Run with --check flag (no changes applied)'
+        )
+    }
+
+    environment {
+        ANSIBLE_VAULT_PASSWORD_FILE = credentials('ansible-vault-password')
+        ANSIBLE_FORCE_COLOR         = '1'
+        ANSIBLE_HOST_KEY_CHECKING   = 'False'
+    }
+
+    triggers {
+        // Check for expiring certificates daily at 06:00
+        cron('0 6 * * *')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    echo "Target host   : ${params.TARGET_HOST ?: 'ALL'}"
+                    echo "Target station: ${params.TARGET_STATION ?: 'ALL'}"
+                    echo "Force renewal : ${params.FORCE_RENEWAL}"
+                    echo "Threshold     : ${params.RENEWAL_THRESHOLD_DAYS} days"
+                    echo "Dry run       : ${params.DRY_RUN}"
+                }
+            }
+        }
+
+        stage('Install Ansible Requirements') {
+            steps {
+                sh '''
+                    pip install --quiet ansible ansible-lint
+                    ansible-galaxy collection install \
+                        community.crypto \
+                        community.general \
+                        ansible.posix
+                '''
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                sh '''
+                    ansible-lint playbooks/renew.yml || true
+                '''
+            }
+        }
+
+        stage('Certificate Renewal') {
+            steps {
+                script {
+                    def extraVars = [
+                        "renewal_force=${params.FORCE_RENEWAL}",
+                        "renewal_threshold_days=${params.RENEWAL_THRESHOLD_DAYS}"
+                    ]
+                    if (params.TARGET_HOST) {
+                        extraVars << "target_host=${params.TARGET_HOST}"
+                    }
+                    if (params.TARGET_STATION) {
+                        extraVars << "target_station=${params.TARGET_STATION}"
+                    }
+                    def extraVarsStr = extraVars.collect { "-e '${it}'" }.join(' ')
+                    def dryRunFlag = params.DRY_RUN ? '--check --diff' : ''
+
+                    sh """
+                        ansible-playbook \
+                            -i ${params.INVENTORY} \
+                            ${extraVarsStr} \
+                            ${dryRunFlag} \
+                            --vault-password-file \${ANSIBLE_VAULT_PASSWORD_FILE} \
+                            playbooks/renew.yml \
+                            | tee renewal_output.txt
+                    """
+                }
+            }
+        }
+
+        stage('Validate Renewals') {
+            when {
+                expression { !params.DRY_RUN }
+            }
+            steps {
+                script {
+                    def targetVars = ''
+                    if (params.TARGET_HOST) {
+                        targetVars = "-e target_host=${params.TARGET_HOST}"
+                    } else if (params.TARGET_STATION) {
+                        targetVars = "-e target_station=${params.TARGET_STATION}"
+                    }
+                    sh """
+                        ansible-playbook \
+                            -i ${params.INVENTORY} \
+                            ${targetVars} \
+                            --vault-password-file \${ANSIBLE_VAULT_PASSWORD_FILE} \
+                            playbooks/validate_all.yml \
+                            | tee validation_output.txt
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '*.txt', allowEmptyArchive: true
+        }
+        failure {
+            emailext(
+                subject: "FAILED: Certificate Renewal - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    Certificate renewal pipeline FAILED.
+                    Job: ${env.JOB_NAME}
+                    Build: ${env.BUILD_NUMBER}
+                    Target: ${params.TARGET_HOST ?: params.TARGET_STATION ?: 'ALL'}
+                    URL: ${env.BUILD_URL}
+                """,
+                to: 'pki-alerts@company.example'
+            )
+        }
+        success {
+            echo 'Certificate renewal completed successfully.'
+        }
+    }
+}

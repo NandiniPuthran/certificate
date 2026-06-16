@@ -1,0 +1,116 @@
+# /etc/ssl/openssl.cnf
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# OpenSSL configuration with revocation checking for {{ ansible_hostname }}
+
+HOME			= .
+
+oid_section		= new_oids
+
+[ new_oids ]
+
+[ ca ]
+default_ca	= CA_default
+
+[ CA_default ]
+dir		= /etc/ssl/company
+certs		= $dir/certs
+crl_dir		= $dir/crl
+database	= $dir/index.txt
+new_certs_dir	= $dir/newcerts
+certificate	= {{ ca_bundle_path }}
+serial		= $dir/serial
+crlnumber	= $dir/crlnumber
+crl		= {{ crl_local_cache_file }}
+private_key	= $dir/private/ca.key
+x509_extensions	= usr_cert
+name_opt	= ca_default
+cert_opt	= ca_default
+default_days	= 365
+default_crl_days = 30
+default_md	= sha256
+preserve	= no
+policy		= policy_anything
+
+[ policy_anything ]
+countryName		= optional
+stateOrProvinceName	= optional
+localityName		= optional
+organizationName	= optional
+organizationalUnitName	= optional
+commonName		= supplied
+emailAddress		= optional
+
+[ req ]
+default_bits		= 4096
+default_md		= sha256
+distinguished_name	= req_distinguished_name
+attributes		= req_attributes
+x509_extensions		= v3_ca
+string_mask		= utf8only
+
+[ req_distinguished_name ]
+countryName			= Country Name (2 letter code)
+countryName_default		= US
+stateOrProvinceName		= State or Province Name
+localityName			= Locality Name
+organizationName		= Organization Name
+commonName			= Common Name
+emailAddress			= Email Address
+
+[ req_attributes ]
+challengePassword		= A challenge password
+
+[ usr_cert ]
+basicConstraints	= CA:FALSE
+nsComment		= "OpenSSL Generated Certificate"
+subjectKeyIdentifier	= hash
+authorityKeyIdentifier	= keyid,issuer
+{% if openssl_crl_check %}
+crlDistributionPoints	= URI:{{ crl_distribution_uri }}
+{% endif %}
+{% if ocsp_enabled %}
+authorityInfoAccess	= OCSP;URI:{{ ocsp_uri }}
+{% endif %}
+
+[ v3_req ]
+basicConstraints	= CA:FALSE
+keyUsage		= nonRepudiation, digitalSignature, keyEncipherment
+
+[ v3_ca ]
+subjectKeyIdentifier	= hash
+authorityKeyIdentifier	= keyid:always,issuer
+basicConstraints	= critical, CA:true
+keyUsage		= critical, digitalSignature, cRLSign, keyCertSign
+
+[ crl_ext ]
+authorityKeyIdentifier	= keyid:always
+
+[ proxy_cert_ext ]
+basicConstraints	= CA:FALSE
+nsComment		= "OpenSSL Generated Proxy Certificate"
+subjectKeyIdentifier	= hash
+authorityKeyIdentifier	= keyid,issuer
+proxyCertInfo		= critical,language:id-ppl-anyLanguage,pathlen:3,policy:foo
+
+#
+# ─── Revocation Checking Configuration ───────────────────────────────────────
+# These settings affect openssl CLI and apps using default SSL_CTX.
+#
+[ ssl_client ]
+# Enable CRL checking for client connections
+{% if openssl_crl_check %}
+VerifyCAFile	= {{ ca_bundle_path }}
+CRLFile		= {{ crl_local_cache_file }}
+{% endif %}
+
+[ default_conf ]
+ssl_conf = ssl_sect
+
+[ssl_sect]
+system_default = system_default_sect
+
+[system_default_sect]
+CipherString = DEFAULT:@SECLEVEL=2
+{% if ocsp_enabled %}
+Options = ServerPreference,SingleDHUse
+{% endif %}

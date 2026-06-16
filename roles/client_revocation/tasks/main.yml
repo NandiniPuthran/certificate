@@ -1,0 +1,33 @@
+---
+# roles/client_revocation/tasks/main.yml
+# Configures Debian-based client hosts for revocation checking
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - openssl
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+
+# ─── 1. CA Trust ──────────────────────────────────────────────────────────────
+- name: Include CA trust setup
+  ansible.builtin.include_tasks: ca_trust.yml
+
+# ─── 2. CRL Caching ───────────────────────────────────────────────────────────
+- name: Include CRL client configuration
+  ansible.builtin.include_tasks: crl_client.yml
+
+# ─── 3. Application configuration ────────────────────────────────────────────
+- name: Configure Docker revocation checking
+  ansible.builtin.include_tasks: app_docker.yml
+  when: configure_docker | bool
+
+- name: Configure Fluent Bit TLS validation
+  ansible.builtin.include_tasks: app_fluent_bit.yml
+  when: configure_fluent_bit | bool
+
+- name: Configure OpenSSL revocation checking
+  ansible.builtin.include_tasks: app_openssl.yml
+  when: configure_openssl | bool

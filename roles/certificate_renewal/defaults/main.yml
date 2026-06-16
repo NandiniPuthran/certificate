@@ -1,0 +1,52 @@
+---
+# roles/certificate_renewal/defaults/main.yml
+
+# ─── Renewal Thresholds ───────────────────────────────────────────────────────
+renewal_threshold_days: 30
+renewal_force: false
+
+# ─── Certificate Locations ────────────────────────────────────────────────────
+cert_base_dir: /etc/ssl/company
+cert_dir: "{{ cert_base_dir }}/certs"
+cert_key_dir: "{{ cert_base_dir }}/private"
+cert_csr_dir: "{{ cert_base_dir }}/csr"
+
+# Certificate file naming convention: {{ cert_cn }}.{crt,key,csr}
+cert_cn: "{{ inventory_hostname }}"
+cert_file: "{{ cert_dir }}/{{ cert_cn }}.crt"
+cert_key_file: "{{ cert_key_dir }}/{{ cert_cn }}.key"
+cert_csr_file: "{{ cert_csr_dir }}/{{ cert_cn }}.csr"
+
+# ─── Key Settings ─────────────────────────────────────────────────────────────
+cert_key_size: 4096
+cert_key_type: RSA
+
+# ─── IPA Signing ──────────────────────────────────────────────────────────────
+ipa_signing_host: ipa-client01.company.example
+cert_profile: caIPAserviceCert
+ipa_admin_user: admin
+ipa_admin_password: "{{ vault_ipa_admin_password }}"
+ipa_realm: COMPANY.EXAMPLE
+
+# ─── CA Bundle ────────────────────────────────────────────────────────────────
+ca_bundle_path: "{{ cert_base_dir }}/ca/ipa-ca.crt"
+ipa_ca_cert_path: /etc/ipa/ca.crt
+
+# ─── Backup ───────────────────────────────────────────────────────────────────
+cert_backup_dir: "{{ cert_base_dir }}/backup"
+cert_backup_enabled: true
+
+# ─── Notification ─────────────────────────────────────────────────────────────
+renewal_notify_enabled: false
+renewal_notify_email: ""
+
+# ─── Post-Renewal Actions ─────────────────────────────────────────────────────
+cert_consumers: []
+# Example:
+# cert_consumers:
+#   - docker
+#   - fluent_bit
+
+# ─── Temporary staging on signing host ───────────────────────────────────────
+ipa_signing_csr_dir: /tmp/ansible_cert_signing
+ipa_signing_cert_dir: /tmp/ansible_cert_signed

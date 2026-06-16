@@ -1,0 +1,174 @@
+---
+# roles/certificate_renewal/tasks/renew.yml
+# Full renewal workflow: backup → keygen → CSR → sign → deploy
+
+# ─── 1. Backup existing certificate ──────────────────────────────────────────
+- name: Backup existing certificate (if present)
+  ansible.builtin.copy:
+    src: "{{ cert_file }}"
+    dest: "{{ cert_backup_dir }}/{{ cert_cn }}.crt.{{ _renewal_timestamp }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - cert_backup_enabled | bool
+    - _cert_stat.stat.exists
+
+- name: Backup existing key (if present)
+  ansible.builtin.copy:
+    src: "{{ cert_key_file }}"
+    dest: "{{ cert_backup_dir }}/{{ cert_cn }}.key.{{ _renewal_timestamp }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - cert_backup_enabled | bool
+    - _cert_stat.stat.exists
+
+# ─── 2. Generate private key ──────────────────────────────────────────────────
+- name: Generate private key
+  community.crypto.openssl_privatekey:
+    path: "{{ cert_key_file }}"
+    type: "{{ cert_key_type }}"
+    size: "{{ cert_key_size | int }}"
+    owner: root
+    group: root
+    mode: "0600"
+    state: present
+    force: "{{ renewal_force | bool }}"
+
+# ─── 3. Generate CSR ──────────────────────────────────────────────────────────
+- name: Build SAN list
+  ansible.builtin.set_fact:
+    _cert_san_list: >-
+      {{
+        (cert_san_dns | default([cert_cn]) | map('regex_replace', '^', 'DNS:') | list)
+        + (cert_san_ip | default([]) | map('regex_replace', '^', 'IP:') | list)
+      }}
+
+- name: Generate CSR
+  community.crypto.openssl_csr:
+    path: "{{ cert_csr_file }}"
+    privatekey_path: "{{ cert_key_file }}"
+    common_name: "{{ cert_cn }}"
+    subject_alt_name: "{{ _cert_san_list }}"
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    extended_key_usage:
+      - serverAuth
+      - clientAuth
+    owner: root
+    group: root
+    mode: "0644"
+    state: present
+    force: "{{ renewal_force | bool }}"
+
+# ─── 4. Prepare signing host staging directories ──────────────────────────────
+- name: Ensure staging directories exist on IPA signing host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  delegate_to: "{{ ipa_signing_host }}"
+  loop:
+    - "{{ ipa_signing_csr_dir }}"
+    - "{{ ipa_signing_cert_dir }}"
+
+# ─── 5. Copy CSR to signing host ─────────────────────────────────────────────
+- name: Fetch CSR from target host
+  ansible.builtin.slurp:
+    src: "{{ cert_csr_file }}"
+  register: _csr_content
+
+- name: Copy CSR to IPA signing host
+  ansible.builtin.copy:
+    content: "{{ _csr_content.content | b64decode }}"
+    dest: "{{ _ipa_csr_remote }}"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ ipa_signing_host }}"
+
+# ─── 6. Submit CSR to FreeIPA and retrieve signed cert ───────────────────────
+- name: Submit CSR to FreeIPA CA
+  ansible.builtin.command:
+    cmd: >
+      kinit -kt /etc/krb5.keytab
+      && ipa cert-request
+        --principal host/{{ cert_cn }}@{{ ipa_realm }}
+        --profile-id {{ cert_profile }}
+        --certificate-out {{ _ipa_cert_remote | quote }}
+        {{ _ipa_csr_remote | quote }}
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _ipa_cert_request
+  changed_when: _ipa_cert_request.rc == 0
+  failed_when: _ipa_cert_request.rc != 0
+  no_log: false
+
+- name: Ensure signed certificate exists on signing host
+  ansible.builtin.stat:
+    path: "{{ _ipa_cert_remote }}"
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _signed_cert_stat
+  failed_when: not _signed_cert_stat.stat.exists
+
+# ─── 7. Fetch signed certificate back to controller, push to target ───────────
+- name: Slurp signed certificate from signing host
+  ansible.builtin.slurp:
+    src: "{{ _ipa_cert_remote }}"
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _signed_cert_content
+
+- name: Deploy signed certificate to target host
+  ansible.builtin.copy:
+    content: "{{ _signed_cert_content.content | b64decode }}"
+    dest: "{{ cert_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: "{{ cert_consumers | map('regex_replace', '^', 'reload_') | list }}"
+
+# ─── 8. Deploy CA bundle ──────────────────────────────────────────────────────
+- name: Ensure CA bundle directory exists
+  ansible.builtin.file:
+    path: "{{ ca_bundle_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Fetch IPA CA certificate from signing host
+  ansible.builtin.slurp:
+    src: "{{ ipa_ca_cert_path }}"
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _ipa_ca_content
+
+- name: Deploy IPA CA bundle to target host
+  ansible.builtin.copy:
+    content: "{{ _ipa_ca_content.content | b64decode }}"
+    dest: "{{ ca_bundle_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+# ─── 9. Cleanup staging on signing host ──────────────────────────────────────
+- name: Remove CSR from signing host
+  ansible.builtin.file:
+    path: "{{ _ipa_csr_remote }}"
+    state: absent
+  delegate_to: "{{ ipa_signing_host }}"
+
+- name: Remove signed cert from signing host staging dir
+  ansible.builtin.file:
+    path: "{{ _ipa_cert_remote }}"
+    state: absent
+  delegate_to: "{{ ipa_signing_host }}"
+
+# ─── 10. Validate deployed certificate ───────────────────────────────────────
+- name: Validate deployed certificate
+  ansible.builtin.include_tasks: validate_renewal.yml

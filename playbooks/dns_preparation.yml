@@ -1,0 +1,88 @@
+---
+# playbooks/dns_preparation.yml
+# Creates DNS A record for crl.company.example pointing to IPA client host
+#
+# Assumptions:
+#   - DNS is managed by FreeIPA (integrated BIND)
+#   - The IPA client host running CRL distribution is the DNS target
+#   - ipa_admin credentials in vault
+#
+# If DNS is managed externally (infoblox, route53, etc.), replace the
+# ipa dnsrecord-add tasks with your DNS provider's Ansible module.
+#
+# Usage:
+#   ansible-playbook playbooks/dns_preparation.yml \
+#     -i inventories/production/hosts.yml \
+#     --ask-vault-pass
+
+- name: DNS Preparation - Create CRL FQDN
+  hosts: ipa_clients
+  gather_facts: true
+  become: true
+  run_once: true
+
+  vars:
+    crl_fqdn: crl.company.example
+    crl_fqdn_short: crl
+    ipa_dns_zone: company.example.
+
+  tasks:
+    - name: Authenticate to IPA
+      ansible.builtin.command:
+        cmd: echo "{{ ipa_admin_password }}" | kinit {{ ipa_admin_user }}
+      no_log: true
+      changed_when: false
+
+    - name: Check if DNS record already exists
+      ansible.builtin.command:
+        cmd: ipa dnsrecord-find {{ ipa_dns_zone | quote }} --name={{ crl_fqdn_short | quote }}
+      register: _dns_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create A record for CRL FQDN
+      ansible.builtin.command:
+        cmd: >
+          ipa dnsrecord-add {{ ipa_dns_zone | quote }}
+            {{ crl_fqdn_short | quote }}
+            --a-rec={{ ansible_default_ipv4.address | quote }}
+      register: _dns_add
+      changed_when: _dns_add.rc == 0
+      failed_when: >-
+        _dns_add.rc != 0
+        and 'already exists' not in _dns_add.stderr | lower
+      when: >-
+        _dns_check.rc != 0
+        or crl_fqdn_short not in _dns_check.stdout
+
+    - name: Verify DNS record resolves
+      ansible.builtin.command:
+        cmd: host {{ crl_fqdn | quote }}
+      register: _dns_verify
+      changed_when: false
+      retries: 5
+      delay: 3
+      until: ansible_default_ipv4.address in _dns_verify.stdout
+
+    - name: Report DNS result
+      ansible.builtin.debug:
+        msg: >-
+          DNS record created:
+          {{ crl_fqdn }} -> {{ ansible_default_ipv4.address }}
+          Verify: {{ _dns_verify.stdout | trim }}
+
+# ─── Notes on external DNS providers ─────────────────────────────────────────
+# If using Route53:
+#   community.aws.route53:
+#     zone: company.example.
+#     record: crl.company.example.
+#     type: A
+#     value: "{{ hostvars[groups.ipa_clients[0]].ansible_default_ipv4.address }}"
+#     state: present
+#
+# If using Infoblox:
+#   infoblox.nios_modules.nios_a_record:
+#     name: crl.company.example
+#     ipv4addr: "{{ hostvars[groups.ipa_clients[0]].ansible_default_ipv4.address }}"
+#     state: present
+#     provider: "{{ nios_provider }}"

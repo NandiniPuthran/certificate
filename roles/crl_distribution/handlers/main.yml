@@ -1,0 +1,20 @@
+---
+# roles/crl_distribution/handlers/main.yml
+
+- name: restart_apache2
+  ansible.builtin.systemd:
+    name: apache2
+    state: restarted
+    enabled: true
+  listen: restart_apache2
+
+- name: reload_apache2
+  ansible.builtin.systemd:
+    name: apache2
+    state: reloaded
+  listen: reload_apache2
+
+- name: systemd_daemon_reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: systemd_daemon_reload

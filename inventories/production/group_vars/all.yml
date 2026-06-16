@@ -1,0 +1,58 @@
+---
+# group_vars/all/main.yml
+# Global variables shared across all hosts
+
+# ─── FreeIPA Settings ─────────────────────────────────────────────────────────
+ipa_server: ipa01.company.example
+ipa_realm: COMPANY.EXAMPLE
+ipa_domain: company.example
+ipa_admin_user: admin
+# Vault-encrypted: vault_ipa_admin_password
+ipa_admin_password: "{{ vault_ipa_admin_password }}"
+
+# ─── Certificate Authority ────────────────────────────────────────────────────
+ipa_ca_cert_path: /etc/ipa/ca.crt
+ipa_ca_nickname: "COMPANY.EXAMPLE IPA CA"
+
+# ─── PKI Endpoints ────────────────────────────────────────────────────────────
+crl_distribution_uri: "http://crl.company.example/crl.pem"
+ocsp_uri: "http://ocsp.company.example"
+crl_fqdn: crl.company.example
+
+# ─── Certificate Defaults ─────────────────────────────────────────────────────
+cert_profile: caIPAserviceCert
+cert_key_size: 4096
+cert_key_type: RSA
+cert_validity_days: 365
+renewal_threshold_days: 30
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+cert_base_dir: /etc/ssl/company
+cert_dir: "{{ cert_base_dir }}/certs"
+cert_key_dir: "{{ cert_base_dir }}/private"
+cert_csr_dir: "{{ cert_base_dir }}/csr"
+ca_bundle_path: "{{ cert_base_dir }}/ca/ipa-ca.crt"
+
+# IPA signing host (must be an IPA-enrolled client)
+ipa_signing_host: ipa-client01.company.example
+
+# ─── CRL Distribution ─────────────────────────────────────────────────────────
+crl_local_path: /etc/ipa/ca.crl
+crl_export_path: /var/www/crl
+crl_filename: crl.pem
+crl_refresh_interval: 14400   # seconds (4 hours - matches IPA default)
+
+# ─── Revocation Reasons (RFC 5280) ────────────────────────────────────────────
+revocation_reasons:
+  unspecified: 0
+  keyCompromise: 1
+  cACompromise: 2
+  affiliationChanged: 3
+  superseded: 4
+  cessationOfOperation: 5
+  certificateHold: 6
+  removeFromCRL: 8
+  privilegeWithdrawn: 9
+  aACompromise: 10
+
+default_revocation_reason: unspecified

@@ -1,0 +1,54 @@
+---
+# roles/certificate_renewal/tasks/check_expiry.yml
+# Determines whether the certificate on the target host is within renewal threshold
+
+- name: Get certificate end date
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -in {{ cert_file | quote }}
+      -noout -enddate
+  register: _cert_enddate_raw
+  changed_when: false
+  failed_when: _cert_enddate_raw.rc != 0
+
+- name: Get certificate serial number (current)
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -in {{ cert_file | quote }}
+      -noout -serial
+  register: _cert_serial_raw
+  changed_when: false
+
+- name: Set current serial fact
+  ansible.builtin.set_fact:
+    cert_current_serial: "{{ _cert_serial_raw.stdout | regex_replace('^serial=', '') | trim }}"
+
+- name: Parse expiry date into seconds since epoch
+  ansible.builtin.command:
+    cmd: >
+      date -d "{{ _cert_enddate_raw.stdout | regex_replace('^notAfter=', '') | trim }}" +%s
+  register: _cert_expiry_epoch
+  changed_when: false
+
+- name: Get current time in epoch seconds
+  ansible.builtin.command:
+    cmd: date +%s
+  register: _now_epoch
+  changed_when: false
+
+- name: Calculate seconds until expiry
+  ansible.builtin.set_fact:
+    _seconds_until_expiry: "{{ (_cert_expiry_epoch.stdout | int) - (_now_epoch.stdout | int) }}"
+
+- name: Determine if renewal is needed
+  ansible.builtin.set_fact:
+    _cert_needs_renewal: "{{ _seconds_until_expiry | int <= _threshold_seconds | int }}"
+
+- name: Report certificate status
+  ansible.builtin.debug:
+    msg: >-
+      Certificate {{ cert_cn }}:
+      expires={{ _cert_enddate_raw.stdout | regex_replace('^notAfter=', '') | trim }},
+      days_remaining={{ (_seconds_until_expiry | int / 86400) | int }},
+      threshold={{ renewal_threshold_days }}d,
+      needs_renewal={{ _cert_needs_renewal }}

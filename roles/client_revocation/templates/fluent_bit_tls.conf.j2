@@ -1,0 +1,24 @@
+# {{ fluent_bit_config_dir }}/tls.conf
+# Fluent Bit TLS configuration - Managed by Ansible
+#
+# Include this file in your main fluent-bit.conf:
+#   @INCLUDE tls.conf
+#
+# Usage in OUTPUT blocks:
+#   tls               On
+#   tls.verify        {{ fluent_bit_tls_verify | lower }}
+#   tls.ca_file       {{ ca_bundle_path }}
+#   tls.crt_file      /etc/ssl/company/certs/<host>.crt
+#   tls.key_file      /etc/ssl/company/private/<host>.key
+#
+# NOTE: Fluent Bit does not support explicit CRL file loading (as of 3.x).
+# Revocation checking relies on:
+#   1. System OpenSSL configuration (see /etc/ssl/openssl.cnf)
+#   2. OCSP stapling at the server (preferred)
+#   3. Network-level blocking of revoked certificate endpoints
+#
+# CA Bundle for this environment:
+#   {{ ca_bundle_path }}
+#
+# OCSP endpoint:
+#   {{ ocsp_uri }}

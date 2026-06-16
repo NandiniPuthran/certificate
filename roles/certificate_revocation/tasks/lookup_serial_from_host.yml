@@ -1,0 +1,30 @@
+---
+# roles/certificate_revocation/tasks/lookup_serial_from_host.yml
+# Discovers the current certificate serial number from a target host
+# Sets fact: cert_serial (hex string)
+
+- name: Check if certificate exists on target host
+  ansible.builtin.stat:
+    path: "{{ cert_file }}"
+  register: _target_cert_stat
+
+- name: Fail if no certificate found on host
+  ansible.builtin.fail:
+    msg: >-
+      No certificate found at {{ cert_file }} on {{ inventory_hostname }}.
+      Cannot determine serial number for revocation.
+  when: not _target_cert_stat.stat.exists
+
+- name: Read certificate serial from target host
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ cert_file | quote }} -noout -serial
+  register: _target_serial_raw
+  changed_when: false
+
+- name: Set cert_serial fact from target certificate
+  ansible.builtin.set_fact:
+    cert_serial: "{{ _target_serial_raw.stdout | regex_replace('^serial=', '') | trim }}"
+
+- name: Report discovered serial
+  ansible.builtin.debug:
+    msg: "Discovered serial {{ cert_serial }} for host {{ inventory_hostname }}"

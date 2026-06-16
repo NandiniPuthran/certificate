@@ -1,0 +1,100 @@
+---
+# roles/crl_distribution/tasks/main.yml
+
+- name: Install Apache2
+  ansible.builtin.apt:
+    name: "{{ apache_package }}"
+    state: present
+    update_cache: true
+  notify: restart_apache2
+
+- name: Ensure CRL document root exists
+  ansible.builtin.file:
+    path: "{{ crl_export_dir }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Deploy Apache virtual host for CRL distribution
+  ansible.builtin.template:
+    src: crl_vhost.conf.j2
+    dest: "{{ apache_vhost_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart_apache2
+
+- name: Enable CRL virtual host
+  ansible.builtin.command:
+    cmd: a2ensite crl-distribution
+  register: _a2ensite_result
+  changed_when: "'Enabling site' in _a2ensite_result.stdout"
+  notify: restart_apache2
+
+- name: Disable default Apache site
+  ansible.builtin.command:
+    cmd: a2dissite 000-default
+  register: _a2dissite_result
+  changed_when: "'Site 000-default disabled' in _a2dissite_result.stdout"
+  failed_when: false
+  notify: restart_apache2
+
+- name: Enable required Apache modules
+  community.general.apache2_module:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - headers
+    - mime
+    - autoindex
+  notify: restart_apache2
+
+- name: Ensure Apache is started and enabled
+  ansible.builtin.systemd:
+    name: "{{ apache_service }}"
+    state: started
+    enabled: true
+
+# ─── Deploy CRL systemd timer for auto-refresh ───────────────────────────────
+- name: Deploy CRL refresh script
+  ansible.builtin.template:
+    src: crl_refresh.sh.j2
+    dest: /usr/local/bin/crl-refresh.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Deploy CRL refresh systemd service unit
+  ansible.builtin.template:
+    src: crl-refresh.service.j2
+    dest: /etc/systemd/system/crl-refresh.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd_daemon_reload
+
+- name: Deploy CRL refresh systemd timer unit
+  ansible.builtin.template:
+    src: crl-refresh.timer.j2
+    dest: /etc/systemd/system/crl-refresh.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd_daemon_reload
+
+- name: Enable and start CRL refresh timer
+  ansible.builtin.systemd:
+    name: crl-refresh.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+
+# ─── Initial CRL population ───────────────────────────────────────────────────
+- name: Run initial CRL refresh
+  ansible.builtin.include_tasks: refresh_crl.yml
+
+# ─── Validate CRL is served ──────────────────────────────────────────────────
+- name: Validate CRL distribution
+  ansible.builtin.include_tasks: validate_crl.yml
+  when: crl_validate_after_publish | bool

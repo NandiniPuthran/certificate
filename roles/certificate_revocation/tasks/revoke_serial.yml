@@ -1,0 +1,50 @@
+---
+# roles/certificate_revocation/tasks/revoke_serial.yml
+# Revokes a single certificate by serial number via FreeIPA
+
+- name: "[{{ _serial_item }}] Convert hex serial to decimal for ipa cert-revoke"
+  ansible.builtin.set_fact:
+    _serial_decimal: "{{ _serial_item | int(base=16) }}"
+
+- name: "[{{ _serial_item }}] Check certificate status in FreeIPA before revoking"
+  ansible.builtin.command:
+    cmd: >
+      ipa cert-show {{ _serial_decimal }} --all
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _cert_show_result
+  changed_when: false
+  failed_when: false
+  environment:
+    KRB5_CLIENT_KTNAME: /etc/krb5.keytab
+
+- name: "[{{ _serial_item }}] Skip if already revoked"
+  ansible.builtin.debug:
+    msg: "Certificate {{ _serial_item }} is already revoked. Skipping."
+  when: "'REVOKED' in _cert_show_result.stdout | upper"
+
+- name: "[{{ _serial_item }}] Revoke certificate in FreeIPA"
+  ansible.builtin.command:
+    cmd: >
+      ipa cert-revoke
+        --revocation-reason={{ revocation_reason | int }}
+        {{ _serial_decimal }}
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _revoke_result
+  changed_when: _revoke_result.rc == 0
+  failed_when: >-
+    _revoke_result.rc != 0
+    and 'already revoked' not in _revoke_result.stderr | lower
+  when: "'REVOKED' not in _cert_show_result.stdout | upper"
+  environment:
+    KRB5_CLIENT_KTNAME: /etc/krb5.keytab
+
+- name: "[{{ _serial_item }}] Log revocation result"
+  ansible.builtin.debug:
+    msg: >-
+      Certificate serial {{ _serial_item }} (decimal={{ _serial_decimal }})
+      revoked with reason={{ revocation_reason }}.
+      IPA output: {{ _revoke_result.stdout | default('already revoked') }}
+  when: "'REVOKED' not in _cert_show_result.stdout | upper"
+
+- name: "[{{ _serial_item }}] Record revocation in registry"
+  ansible.builtin.include_tasks: record_revocation.yml

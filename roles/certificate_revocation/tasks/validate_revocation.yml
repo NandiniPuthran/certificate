@@ -1,0 +1,95 @@
+---
+# roles/certificate_revocation/tasks/validate_revocation.yml
+# Validates that a certificate is properly revoked
+
+- name: "[{{ _serial_item }}] Convert hex to decimal for validation"
+  ansible.builtin.set_fact:
+    _val_serial_decimal: "{{ _serial_item | int(base=16) }}"
+
+# ─── 1. IPA shows cert as revoked ────────────────────────────────────────────
+- name: "[{{ _serial_item }}] Verify FreeIPA shows cert as revoked"
+  ansible.builtin.command:
+    cmd: ipa cert-show {{ _val_serial_decimal }} --all
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _val_ipa_show
+  changed_when: false
+  environment:
+    KRB5_CLIENT_KTNAME: /etc/krb5.keytab
+
+- name: "[{{ _serial_item }}] Assert FreeIPA status is REVOKED"
+  ansible.builtin.assert:
+    that:
+      - "'revoked' in _val_ipa_show.stdout | lower"
+    fail_msg: "FreeIPA does NOT show serial {{ _serial_item }} as revoked!"
+    success_msg: "✓ FreeIPA confirms serial {{ _serial_item }} is revoked."
+
+# ─── 2. CRL contains serial ──────────────────────────────────────────────────
+- name: "[{{ _serial_item }}] Download current CRL for validation"
+  ansible.builtin.get_url:
+    url: "{{ crl_distribution_uri }}"
+    dest: "/tmp/validate_crl_{{ _serial_item }}.pem"
+    mode: "0644"
+    force: true
+  delegate_to: localhost
+  become: false
+  failed_when: false
+  register: _crl_download
+
+- name: "[{{ _serial_item }}] Check CRL for revoked serial"
+  ansible.builtin.command:
+    cmd: >
+      openssl crl -in /tmp/validate_crl_{{ _serial_item }}.pem
+      -noout -text
+  delegate_to: localhost
+  become: false
+  register: _crl_text
+  changed_when: false
+  when: _crl_download is succeeded
+
+- name: "[{{ _serial_item }}] Assert serial appears in CRL"
+  ansible.builtin.assert:
+    that:
+      - _serial_item | lower in _crl_text.stdout | lower
+    fail_msg: >-
+      Serial {{ _serial_item }} NOT found in CRL at {{ crl_distribution_uri }}!
+      CRL may not have refreshed yet.
+    success_msg: "✓ Serial {{ _serial_item }} confirmed in CRL."
+  when:
+    - _crl_download is succeeded
+    - _crl_text is defined
+
+# ─── 3. OCSP reports revoked ─────────────────────────────────────────────────
+- name: "[{{ _serial_item }}] Check OCSP status"
+  ansible.builtin.command:
+    cmd: >
+      openssl ocsp
+        -issuer {{ ca_bundle_path | quote }}
+        -serial 0x{{ _serial_item }}
+        -url {{ ocsp_uri | quote }}
+        -CAfile {{ ca_bundle_path | quote }}
+        -noverify
+  delegate_to: localhost
+  become: false
+  register: _ocsp_result
+  changed_when: false
+  failed_when: false
+  when: revocation_validate_ocsp | bool
+
+- name: "[{{ _serial_item }}] Assert OCSP reports revoked"
+  ansible.builtin.assert:
+    that:
+      - "'revoked' in _ocsp_result.stdout | lower"
+    fail_msg: "OCSP does NOT report serial {{ _serial_item }} as revoked! Output: {{ _ocsp_result.stdout }}"
+    success_msg: "✓ OCSP confirms serial {{ _serial_item }} is revoked."
+  when:
+    - revocation_validate_ocsp | bool
+    - _ocsp_result is defined
+
+# ─── Cleanup temp files ──────────────────────────────────────────────────────
+- name: "[{{ _serial_item }}] Remove temp CRL file"
+  ansible.builtin.file:
+    path: "/tmp/validate_crl_{{ _serial_item }}.pem"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: _crl_download is succeeded

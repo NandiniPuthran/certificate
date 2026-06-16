@@ -1,0 +1,12 @@
+[Unit]
+Description=CRL Distribution Refresh
+Documentation=https://wiki.company.example/pki/crl
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crl-refresh.sh
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crl-refresh

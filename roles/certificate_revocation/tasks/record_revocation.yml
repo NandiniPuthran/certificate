@@ -1,0 +1,60 @@
+---
+# roles/certificate_revocation/tasks/record_revocation.yml
+# Maintains a JSON registry of revoked certs on the Ansible controller
+# for audit trail and station/device correlation
+
+- name: Ensure registry directory exists on controller
+  ansible.builtin.file:
+    path: "{{ cert_serial_registry | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  delegate_to: localhost
+  become: true
+
+- name: Read existing serial registry
+  ansible.builtin.slurp:
+    src: "{{ cert_serial_registry }}"
+  delegate_to: localhost
+  become: true
+  register: _registry_raw
+  failed_when: false
+
+- name: Parse existing registry
+  ansible.builtin.set_fact:
+    _registry: >-
+      {{
+        (_registry_raw.content | b64decode | from_json)
+        if _registry_raw.content is defined
+        else {}
+      }}
+
+- name: Build revocation record
+  ansible.builtin.set_fact:
+    _revocation_record:
+      serial_hex: "{{ _serial_item }}"
+      serial_decimal: "{{ _serial_decimal }}"
+      host: "{{ inventory_hostname }}"
+      station: "{{ station | default('unknown') }}"
+      cert_cn: "{{ cert_cn }}"
+      reason_code: "{{ revocation_reason | int }}"
+      revoked_at: "{{ ansible_date_time.iso8601 }}"
+      revoked_by: "{{ lookup('env', 'USER') }}"
+
+- name: Merge revocation into registry
+  ansible.builtin.set_fact:
+    _registry_updated: >-
+      {{
+        _registry | combine({ _serial_item: _revocation_record })
+      }}
+
+- name: Write updated registry
+  ansible.builtin.copy:
+    content: "{{ _registry_updated | to_nice_json }}"
+    dest: "{{ cert_serial_registry }}"
+    owner: root
+    group: root
+    mode: "0640"
+  delegate_to: localhost
+  become: true

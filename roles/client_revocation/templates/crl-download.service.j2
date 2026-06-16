@@ -1,0 +1,14 @@
+[Unit]
+Description=CRL Download and Cache Refresh
+Documentation=https://wiki.company.example/pki/crl
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crl-download.sh
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crl-download
+TimeoutStartSec=60

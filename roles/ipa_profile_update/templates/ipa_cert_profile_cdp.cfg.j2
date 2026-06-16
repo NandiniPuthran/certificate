@@ -1,0 +1,65 @@
+# roles/ipa_profile_update/templates/ipa_cert_profile_cdp.cfg.j2
+# FreeIPA / Dogtag Certificate Profile
+# Profile: {{ ipa_cert_profile_id }}
+# Managed by Ansible - DO NOT EDIT MANUALLY
+#
+# This profile is based on the exported caIPAserviceCert profile with the
+# following extensions added:
+#   - CRL Distribution Points (OID 2.5.29.31)
+#   - Authority Information Access / OCSP (OID 1.3.6.1.5.5.7.1.1)
+#
+# IMPLEMENTATION NOTES:
+# ---------------------
+# FreeIPA profiles are stored as Java property files consumed by Dogtag PKI.
+# The key naming convention is:
+#   policyset.<setname>.<n>.default.class_id   - which policy plugin
+#   policyset.<setname>.<n>.default.params.<k> - plugin parameters
+#   policyset.<setname>.<n>.constraint.class_id - constraint plugin
+#
+# We inject two new policy set entries into serverCertSet (the set used
+# for service/host certificates). Dogtag counts policy entries starting at 1.
+# We use high numbers (12, 13) to avoid colliding with existing entries.
+#
+# To discover existing policy numbers from the exported profile:
+#   grep "policyset.serverCertSet.[0-9]*\.default.class_id" <profile.cfg>
+
+{{ _profile_content }}
+
+#
+# ─── BEGIN ANSIBLE-INJECTED EXTENSIONS ───────────────────────────────────────
+#
+
+# Extension 12: CRL Distribution Points
+policyset.serverCertSet.12.default.class_id=crlDistributionPointsExtDefaultImpl
+policyset.serverCertSet.12.default.name=CRL Distribution Points Extension Default
+policyset.serverCertSet.12.default.params.crlDistributionPointsNum=1
+policyset.serverCertSet.12.default.params.crlDistributionPointsEnable_0=true
+policyset.serverCertSet.12.default.params.crlDistributionPointsPointName_0={{ crl_distribution_uri }}
+policyset.serverCertSet.12.default.params.crlDistributionPointsPointType_0=URIName
+policyset.serverCertSet.12.default.params.crlDistributionPointsReasons_0=
+policyset.serverCertSet.12.default.params.crlDistributionPointsIssuerName_0=
+policyset.serverCertSet.12.default.params.crlDistributionPointsIssuerType_0=
+policyset.serverCertSet.12.constraint.class_id=noConstraintImpl
+policyset.serverCertSet.12.constraint.name=No Constraint
+
+# Extension 13: Authority Information Access (OCSP)
+policyset.serverCertSet.13.default.class_id=authInfoAccessExtDefaultImpl
+policyset.serverCertSet.13.default.name=Authority Information Access Extension Default
+policyset.serverCertSet.13.default.params.authInfoAccessADEnable_0=true
+policyset.serverCertSet.13.default.params.authInfoAccessADLocationType_0=URIName
+policyset.serverCertSet.13.default.params.authInfoAccessADLocation_0={{ ocsp_uri }}
+policyset.serverCertSet.13.default.params.authInfoAccessADMethod_0=1.3.6.1.5.5.7.48.1
+policyset.serverCertSet.13.default.params.authInfoAccessCritical=false
+policyset.serverCertSet.13.default.params.authInfoAccessNumADs=1
+policyset.serverCertSet.13.constraint.class_id=noConstraintImpl
+policyset.serverCertSet.13.constraint.name=No Constraint
+
+# Update the policy set list to include new entries
+# Note: This replaces the existing policyset.serverCertSet.list value.
+# The original profile's list value must be discovered at export time.
+# Ansible reads the exported file and appends; the import will override.
+policyset.serverCertSet.list=1,2,3,4,5,6,7,8,9,10,11,12,13
+
+#
+# ─── END ANSIBLE-INJECTED EXTENSIONS ─────────────────────────────────────────
+#

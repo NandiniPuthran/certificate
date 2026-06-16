@@ -1,0 +1,39 @@
+---
+# roles/client_revocation/defaults/main.yml
+# Configures Debian-based non-IPA hosts to perform certificate revocation checking
+
+# ─── CA Trust ─────────────────────────────────────────────────────────────────
+ca_bundle_path: /etc/ssl/company/ca/ipa-ca.crt
+ca_trust_store_dir: /usr/local/share/ca-certificates
+ca_trust_filename: ipa-company-ca.crt
+ipa_signing_host: ipa-client01.company.example
+ipa_ca_cert_path: /etc/ipa/ca.crt
+
+# ─── CRL Configuration ────────────────────────────────────────────────────────
+crl_distribution_uri: "http://crl.company.example/crl.pem"
+crl_local_cache_dir: /etc/ssl/company/crl
+crl_local_cache_file: "{{ crl_local_cache_dir }}/crl.pem"
+crl_refresh_interval_minutes: 60
+
+# ─── OCSP Configuration ───────────────────────────────────────────────────────
+ocsp_uri: "http://ocsp.company.example"
+ocsp_enabled: true
+
+# ─── Applications to configure ────────────────────────────────────────────────
+# Set to true to configure each application
+configure_docker: false
+configure_fluent_bit: false
+configure_openssl: true
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+docker_service_name: docker
+docker_daemon_json_path: /etc/docker/daemon.json
+
+# ─── Fluent Bit ───────────────────────────────────────────────────────────────
+fluent_bit_config_dir: /etc/fluent-bit
+fluent_bit_service_name: fluent-bit
+fluent_bit_tls_verify: true
+
+# ─── OpenSSL ──────────────────────────────────────────────────────────────────
+openssl_conf_path: /etc/ssl/openssl.cnf
+openssl_crl_check: true

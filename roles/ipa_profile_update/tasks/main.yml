@@ -1,0 +1,85 @@
+---
+# roles/ipa_profile_update/tasks/main.yml
+# Modifies a FreeIPA certificate profile to include CRL Distribution Point
+# and OCSP Authority Information Access extensions
+
+- name: Ensure working directory exists
+  ansible.builtin.file:
+    path: "{{ profile_work_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  delegate_to: "{{ ipa_signing_host }}"
+
+- name: Ensure backup directory exists
+  ansible.builtin.file:
+    path: "{{ profile_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  delegate_to: "{{ ipa_signing_host }}"
+
+# ─── 1. Export existing profile ──────────────────────────────────────────────
+- name: Export existing profile from FreeIPA
+  ansible.builtin.command:
+    cmd: >
+      ipa certprofile-show {{ ipa_cert_profile_id | quote }}
+        --out {{ profile_work_dir }}/{{ ipa_cert_profile_id }}.cfg
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _profile_export
+  changed_when: false
+  environment:
+    KRB5_CLIENT_KTNAME: /etc/krb5.keytab
+
+- name: Backup original profile
+  ansible.builtin.copy:
+    src: "{{ profile_work_dir }}/{{ ipa_cert_profile_id }}.cfg"
+    dest: "{{ profile_backup_dir }}/{{ ipa_cert_profile_id }}.cfg.{{ ansible_date_time.epoch }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0640"
+  delegate_to: "{{ ipa_signing_host }}"
+
+# ─── 2. Modify profile ───────────────────────────────────────────────────────
+- name: Read profile file content
+  ansible.builtin.slurp:
+    src: "{{ profile_work_dir }}/{{ ipa_cert_profile_id }}.cfg"
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _profile_raw
+
+- name: Set profile content fact
+  ansible.builtin.set_fact:
+    _profile_content: "{{ _profile_raw.content | b64decode }}"
+
+- name: Deploy modified profile from template
+  ansible.builtin.template:
+    src: ipa_cert_profile_cdp.cfg.j2
+    dest: "{{ profile_work_dir }}/{{ ipa_cert_profile_id }}_updated.cfg"
+    owner: root
+    group: root
+    mode: "0640"
+  delegate_to: "{{ ipa_signing_host }}"
+
+# ─── 3. Re-import modified profile ───────────────────────────────────────────
+- name: Import modified profile into FreeIPA
+  ansible.builtin.command:
+    cmd: >
+      ipa certprofile-mod {{ ipa_cert_profile_id | quote }}
+        --file {{ profile_work_dir }}/{{ ipa_cert_profile_id }}_updated.cfg
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _profile_import
+  changed_when: _profile_import.rc == 0
+  failed_when: _profile_import.rc != 0
+  environment:
+    KRB5_CLIENT_KTNAME: /etc/krb5.keytab
+  notify:
+    - restart_dogtag_ca
+    - validate_ipa_services
+
+# ─── 4. Validate profile update ──────────────────────────────────────────────
+- name: Validate profile update
+  ansible.builtin.include_tasks: validate_profile.yml
+  when: profile_validate_after_update | bool

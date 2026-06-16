@@ -1,0 +1,76 @@
+---
+# playbooks/validate_all.yml
+# Comprehensive validation of PKI lifecycle stack
+#
+# Validates:
+# - CRL distribution endpoint
+# - Per-host certificate validity
+# - Revocation checking on clients
+#
+# Usage:
+#   ansible-playbook playbooks/validate_all.yml \
+#     -i inventories/production/hosts.yml
+
+- name: Validate CRL Distribution
+  hosts: ipa_clients
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Validate CRL server
+      ansible.builtin.include_role:
+        name: crl_distribution
+        tasks_from: validate_crl.yml
+
+- name: Validate Certificates on Target Hosts
+  hosts: cert_targets
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Check certificate expiry status
+      ansible.builtin.include_role:
+        name: certificate_renewal
+        tasks_from: check_expiry.yml
+
+    - name: Report certificate status
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: serial={{ cert_current_serial | default('n/a') }},
+          days_remaining={{ (_seconds_until_expiry | default(0) | int / 86400) | int }},
+          needs_renewal={{ _cert_needs_renewal | default('unknown') }}
+
+- name: Validate Client Revocation Configuration
+  hosts: cert_targets
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Verify CRL cache exists and is current
+      ansible.builtin.stat:
+        path: "{{ crl_local_cache_file }}"
+      register: _client_crl_stat
+
+    - name: Assert CRL cache exists
+      ansible.builtin.assert:
+        that:
+          - _client_crl_stat.stat.exists
+        fail_msg: "No CRL cache found at {{ crl_local_cache_file }} on {{ inventory_hostname }}"
+        success_msg: "✓ CRL cache present on {{ inventory_hostname }}"
+
+    - name: Verify CRL cache is valid
+      ansible.builtin.command:
+        cmd: openssl crl -in {{ crl_local_cache_file | quote }} -noout
+      changed_when: false
+      failed_when: false
+      register: _crl_cache_valid
+
+    - name: Assert CRL cache is valid PEM
+      ansible.builtin.assert:
+        that:
+          - _crl_cache_valid.rc == 0
+        fail_msg: "CRL cache at {{ crl_local_cache_file }} is NOT valid PEM!"
+        success_msg: "✓ CRL cache is valid on {{ inventory_hostname }}"
+
+    - name: Verify CA bundle exists
+      ansible.builtin.stat:
+        path: "{{ ca_bundle_path }}"
+      register: _ca_bundle_stat
+      failed_when: not _ca_bundle_stat.stat.exists

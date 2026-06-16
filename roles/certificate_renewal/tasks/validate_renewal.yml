@@ -1,0 +1,83 @@
+---
+# roles/certificate_renewal/tasks/validate_renewal.yml
+# Post-renewal validation: confirms cert is valid, matches key, and has new serial
+
+- name: Verify certificate file exists
+  ansible.builtin.stat:
+    path: "{{ cert_file }}"
+  register: _post_cert_stat
+  failed_when: not _post_cert_stat.stat.exists
+
+- name: Verify certificate is valid PEM
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ cert_file | quote }} -noout -text
+  register: _post_cert_verify
+  changed_when: false
+  failed_when: _post_cert_verify.rc != 0
+
+- name: Get new certificate serial number
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ cert_file | quote }} -noout -serial
+  register: _new_serial_raw
+  changed_when: false
+
+- name: Set new serial fact
+  ansible.builtin.set_fact:
+    cert_new_serial: "{{ _new_serial_raw.stdout | regex_replace('^serial=', '') | trim }}"
+
+- name: Verify serial number changed (renewal produced a new certificate)
+  ansible.builtin.assert:
+    that:
+      - cert_new_serial != cert_current_serial | default('')
+    fail_msg: >-
+      Certificate serial {{ cert_new_serial }} is the same as before renewal
+      ({{ cert_current_serial | default('unknown') }}). Renewal may have failed.
+    success_msg: "New certificate serial: {{ cert_new_serial }} (was: {{ cert_current_serial | default('n/a') }})"
+  when: cert_current_serial is defined
+
+- name: Verify certificate CN matches expected value
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -in {{ cert_file | quote }} -noout -subject
+  register: _cert_subject
+  changed_when: false
+
+- name: Assert CN in certificate subject
+  ansible.builtin.assert:
+    that:
+      - cert_cn in _cert_subject.stdout
+    fail_msg: "Expected CN {{ cert_cn }} not found in certificate subject: {{ _cert_subject.stdout }}"
+    success_msg: "Certificate CN verified: {{ cert_cn }}"
+
+- name: Verify private key and certificate match (modulus check)
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail &&
+      openssl x509 -in {{ cert_file | quote }} -noout -modulus | md5sum &&
+      openssl rsa -in {{ cert_key_file | quote }} -noout -modulus | md5sum
+  register: _modulus_check
+  changed_when: false
+  failed_when: false
+
+- name: Assert key and cert moduli match
+  ansible.builtin.assert:
+    that:
+      - _modulus_check.stdout_lines | length == 2
+      - _modulus_check.stdout_lines[0] == _modulus_check.stdout_lines[1]
+    fail_msg: "Private key and certificate do NOT match! Deployment may be broken."
+    success_msg: "Private key and certificate moduli match."
+
+- name: Check certificate expiry is in the future (>= threshold)
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -in {{ cert_file | quote }} -noout -checkend
+      {{ _threshold_seconds | int }}
+  register: _expiry_check
+  changed_when: false
+  failed_when: _expiry_check.rc != 0
+
+- name: Report renewal success
+  ansible.builtin.debug:
+    msg: >-
+      ✓ Certificate renewed successfully for {{ cert_cn }}.
+      New serial: {{ cert_new_serial }}.

@@ -1,0 +1,52 @@
+---
+# roles/certificate_revocation/tasks/main.yml
+
+- name: Validate that revocation parameters are provided
+  ansible.builtin.assert:
+    that:
+      - cert_serial is defined or cert_serials is defined
+    fail_msg: >-
+      You must provide cert_serial (single) or cert_serials (list).
+      Run the inventory_serial_lookup.yml task first to discover serials by host.
+
+# ─── Build serial list ───────────────────────────────────────────────────────
+- name: Normalise to a list of serials
+  ansible.builtin.set_fact:
+    _serials_to_revoke: >-
+      {{
+        cert_serials
+        if cert_serials is defined
+        else [cert_serial]
+      }}
+
+- name: Log revocation targets
+  ansible.builtin.debug:
+    msg: >-
+      Revoking {{ _serials_to_revoke | length }} certificate(s)
+      with reason={{ revocation_reason }} ({{ revocation_reasons | dict2items
+        | selectattr('value', 'equalto', revocation_reason | int)
+        | map(attribute='key') | first | default('unspecified') }})
+
+# ─── Revoke each serial ──────────────────────────────────────────────────────
+- name: Revoke certificates in FreeIPA
+  ansible.builtin.include_tasks: revoke_serial.yml
+  loop: "{{ _serials_to_revoke }}"
+  loop_control:
+    loop_var: _serial_item
+    label: "serial={{ _serial_item }}"
+
+# ─── Trigger CRL refresh ─────────────────────────────────────────────────────
+- name: Trigger CRL distribution refresh
+  ansible.builtin.include_role:
+    name: crl_distribution
+    tasks_from: refresh_crl.yml
+  when: revocation_trigger_crl_refresh | bool
+  delegate_to: "{{ ipa_signing_host }}"
+
+# ─── Validate revocation ─────────────────────────────────────────────────────
+- name: Validate revocations
+  ansible.builtin.include_tasks: validate_revocation.yml
+  loop: "{{ _serials_to_revoke }}"
+  loop_control:
+    loop_var: _serial_item
+    label: "validate serial={{ _serial_item }}"

@@ -1,0 +1,69 @@
+---
+# roles/certificate_renewal/tasks/main.yml
+
+- name: Include OS-specific vars
+  ansible.builtin.include_vars:
+    file: "{{ item }}"
+  with_first_found:
+    - files:
+        - "{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.yml"
+        - "{{ ansible_distribution }}.yml"
+        - "{{ ansible_os_family }}.yml"
+      paths: "{{ role_path }}/vars"
+      skip: true
+
+- name: Ensure required directories exist on target host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ cert_dir }}"
+    - "{{ cert_csr_dir }}"
+    - "{{ cert_backup_dir }}"
+
+- name: Ensure private key directory exists (restricted)
+  ansible.builtin.file:
+    path: "{{ cert_key_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0710"
+
+- name: Check if certificate exists
+  ansible.builtin.stat:
+    path: "{{ cert_file }}"
+  register: _cert_stat
+
+- name: Check certificate expiry
+  ansible.builtin.include_tasks: check_expiry.yml
+  when: _cert_stat.stat.exists
+
+- name: Determine if renewal is required
+  ansible.builtin.set_fact:
+    _renewal_required: >-
+      {{
+        not _cert_stat.stat.exists
+        or renewal_force | bool
+        or (_cert_stat.stat.exists and _cert_needs_renewal | default(false))
+      }}
+
+- name: Log renewal decision
+  ansible.builtin.debug:
+    msg: >-
+      Host={{ inventory_hostname }}
+      cert_exists={{ _cert_stat.stat.exists }}
+      force={{ renewal_force }}
+      needs_renewal={{ _cert_needs_renewal | default('n/a') }}
+      renewal_required={{ _renewal_required }}
+
+- name: Run renewal workflow
+  ansible.builtin.include_tasks: renew.yml
+  when: _renewal_required | bool
+
+- name: Skip renewal (cert is valid)
+  ansible.builtin.debug:
+    msg: "Certificate for {{ cert_cn }} is valid and not due for renewal. Skipping."
+  when: not _renewal_required | bool

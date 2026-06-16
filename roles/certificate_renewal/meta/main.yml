@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: certificate_renewal
+  author: company-infra
+  description: Manages TLS certificate renewal for non-FreeIPA client hosts using FreeIPA as CA
+  company: Company
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+  galaxy_tags:
+    - pki
+    - certificates
+    - tls
+    - freeipa
+
+dependencies: []

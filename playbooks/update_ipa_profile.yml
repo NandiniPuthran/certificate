@@ -1,0 +1,36 @@
+---
+# playbooks/update_ipa_profile.yml
+# Updates FreeIPA certificate profile to include CRL DP and OCSP extensions
+#
+# Run ONCE after CRL distribution server is operational.
+# Requires IPA admin credentials in vault.
+#
+# Usage:
+#   ansible-playbook playbooks/update_ipa_profile.yml \
+#     -i inventories/production/hosts.yml \
+#     --ask-vault-pass
+
+- name: Update FreeIPA Certificate Profile
+  hosts: ipa_clients
+  gather_facts: true
+  become: true
+  run_once: true
+
+  pre_tasks:
+    - name: Validate CRL endpoint is reachable before updating profile
+      ansible.builtin.uri:
+        url: "{{ crl_distribution_uri }}"
+        method: GET
+        status_code: 200
+        timeout: 10
+      delegate_to: localhost
+      become: false
+      register: _crl_pre_check
+      failed_when: _crl_pre_check.status != 200
+
+    - name: Report CRL pre-check success
+      ansible.builtin.debug:
+        msg: "CRL endpoint {{ crl_distribution_uri }} is reachable. Proceeding."
+
+  roles:
+    - role: ipa_profile_update

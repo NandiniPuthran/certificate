@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# /usr/local/bin/crl-download.sh
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Downloads CRL from distribution point and validates it
+
+set -euo pipefail
+
+CRL_URL="{{ crl_distribution_uri }}"
+CRL_DEST="{{ crl_local_cache_file }}"
+CA_BUNDLE="{{ ca_bundle_path }}"
+LOG_TAG="crl-download"
+
+log() { logger -t "${LOG_TAG}" "$*"; }
+
+# Download to temp file
+TMP=$(mktemp /tmp/crl_download.XXXXXX.pem)
+trap 'rm -f "${TMP}"' EXIT
+
+log "Downloading CRL from ${CRL_URL}"
+if ! curl --silent --fail --max-time 30 \
+    --cacert "${CA_BUNDLE}" \
+    -o "${TMP}" "${CRL_URL}"; then
+    log "ERROR: Failed to download CRL from ${CRL_URL}"
+    exit 1
+fi
+
+# Validate downloaded CRL
+if ! openssl crl -in "${TMP}" -noout 2>/dev/null; then
+    log "ERROR: Downloaded file is not a valid CRL"
+    exit 1
+fi
+
+# Check CRL is not expired
+NEXT_UPDATE=$(openssl crl -in "${TMP}" -noout -nextupdate | sed 's/nextUpdate=//')
+NEXT_EPOCH=$(date -d "${NEXT_UPDATE}" +%s)
+NOW=$(date +%s)
+if [[ "${NEXT_EPOCH}" -le "${NOW}" ]]; then
+    log "WARNING: Downloaded CRL is EXPIRED (nextUpdate: ${NEXT_UPDATE})"
+    # Still install it - it's better than nothing
+fi
+
+# Atomic replace
+mkdir -p "$(dirname "${CRL_DEST}")"
+chmod 0644 "${TMP}"
+mv "${TMP}" "${CRL_DEST}"
+
+log "CRL updated successfully: ${CRL_DEST} (nextUpdate: ${NEXT_UPDATE})"

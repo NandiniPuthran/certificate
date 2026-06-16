@@ -1,0 +1,88 @@
+---
+# roles/crl_distribution/tasks/validate_crl.yml
+
+- name: Verify CRL file exists locally
+  ansible.builtin.stat:
+    path: "{{ crl_full_path }}"
+  register: _crl_file_stat
+  failed_when: not _crl_file_stat.stat.exists
+
+- name: Verify CRL is valid PEM
+  ansible.builtin.command:
+    cmd: openssl crl -in {{ crl_full_path | quote }} -noout -text
+  register: _crl_valid
+  changed_when: false
+  failed_when: _crl_valid.rc != 0
+
+- name: Check CRL is reachable via HTTP
+  ansible.builtin.uri:
+    url: "http://{{ crl_fqdn }}/{{ crl_filename }}"
+    method: GET
+    return_content: false
+    status_code: 200
+    timeout: 10
+  register: _crl_http_check
+  delegate_to: localhost
+  become: false
+  failed_when: _crl_http_check.status != 200
+
+- name: Download CRL from HTTP endpoint for content verification
+  ansible.builtin.get_url:
+    url: "http://{{ crl_fqdn }}/{{ crl_filename }}"
+    dest: /tmp/crl_validate.pem
+    mode: "0644"
+    force: true
+  delegate_to: localhost
+  become: false
+
+- name: Verify downloaded CRL is valid PEM
+  ansible.builtin.command:
+    cmd: openssl crl -in /tmp/crl_validate.pem -noout -text
+  delegate_to: localhost
+  become: false
+  register: _crl_http_content_valid
+  changed_when: false
+  failed_when: _crl_http_content_valid.rc != 0
+
+- name: Check CRL nextUpdate age
+  ansible.builtin.command:
+    cmd: openssl crl -in /tmp/crl_validate.pem -noout -nextupdate
+  delegate_to: localhost
+  become: false
+  register: _crl_nextupdate
+  changed_when: false
+
+- name: Parse nextUpdate epoch
+  ansible.builtin.command:
+    cmd: >
+      date -d "{{ _crl_nextupdate.stdout | regex_replace('^nextUpdate=', '') | trim }}" +%s
+  delegate_to: localhost
+  become: false
+  register: _crl_next_epoch
+  changed_when: false
+
+- name: Get current time
+  ansible.builtin.command:
+    cmd: date +%s
+  delegate_to: localhost
+  become: false
+  register: _now_epoch_val
+  changed_when: false
+
+- name: Assert CRL is not expired
+  ansible.builtin.assert:
+    that:
+      - _crl_next_epoch.stdout | int > _now_epoch_val.stdout | int
+    fail_msg: "CRL at {{ crl_fqdn }} is EXPIRED (nextUpdate in the past)!"
+    success_msg: "✓ CRL is valid. nextUpdate={{ _crl_nextupdate.stdout }}"
+
+- name: Cleanup temp validation file
+  ansible.builtin.file:
+    path: /tmp/crl_validate.pem
+    state: absent
+  delegate_to: localhost
+  become: false
+
+- name: Report CRL validation success
+  ansible.builtin.debug:
+    msg: "✓ CRL distribution validated. HTTP endpoint responding, content valid, not expired."

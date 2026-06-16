@@ -1,0 +1,179 @@
+// jenkins/Jenkinsfile.revocation
+// Certificate Revocation Pipeline
+// MANUAL TRIGGER ONLY - no automatic schedule
+// Requires operator confirmation
+
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'TARGET_HOST',
+            defaultValue: '',
+            description: 'Host whose certificate should be revoked (leave empty for station-wide)'
+        )
+        string(
+            name: 'TARGET_STATION',
+            defaultValue: '',
+            description: 'Station for which ALL certificates should be revoked'
+        )
+        string(
+            name: 'CERT_SERIAL',
+            defaultValue: '',
+            description: 'Explicit certificate serial (hex). If empty, serial is discovered from host.'
+        )
+        choice(
+            name: 'REVOCATION_REASON',
+            choices: [
+                '0 - unspecified',
+                '1 - keyCompromise',
+                '2 - cACompromise',
+                '3 - affiliationChanged',
+                '4 - superseded',
+                '5 - cessationOfOperation',
+                '6 - certificateHold'
+            ],
+            description: 'RFC 5280 revocation reason'
+        )
+        string(
+            name: 'INVENTORY',
+            defaultValue: 'inventories/production/hosts.yml',
+            description: 'Ansible inventory path'
+        )
+        string(
+            name: 'CONFIRMATION',
+            defaultValue: '',
+            description: 'Type REVOKE to confirm. This action is IRREVERSIBLE.'
+        )
+    }
+
+    environment {
+        ANSIBLE_VAULT_PASSWORD_FILE = credentials('ansible-vault-password')
+        ANSIBLE_FORCE_COLOR         = '1'
+        ANSIBLE_HOST_KEY_CHECKING   = 'False'
+    }
+
+    stages {
+        stage('Safety Check') {
+            steps {
+                script {
+                    if (params.CONFIRMATION != 'REVOKE') {
+                        error("Revocation aborted: CONFIRMATION parameter must be 'REVOKE'. Got: '${params.CONFIRMATION}'")
+                    }
+                    if (!params.TARGET_HOST && !params.TARGET_STATION) {
+                        error("Either TARGET_HOST or TARGET_STATION must be specified.")
+                    }
+                    echo "Revocation confirmed by ${currentBuild.rawBuild.getCause(hudson.model.Cause.UserIdCause)?.userId ?: 'unknown'}"
+                    echo "Target: ${params.TARGET_HOST ?: params.TARGET_STATION}"
+                    echo "Reason: ${params.REVOCATION_REASON}"
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Requirements') {
+            steps {
+                sh 'pip install --quiet ansible'
+                sh 'ansible-galaxy collection install community.crypto community.general'
+            }
+        }
+
+        stage('Revoke Certificate(s)') {
+            steps {
+                script {
+                    def reasonCode = params.REVOCATION_REASON.split(' ')[0]
+                    def extraVars = [
+                        "revocation_reason=${reasonCode}",
+                        "revocation_skip_confirm=true"
+                    ]
+                    if (params.TARGET_HOST) {
+                        extraVars << "target_host=${params.TARGET_HOST}"
+                    }
+                    if (params.TARGET_STATION) {
+                        extraVars << "target_station=${params.TARGET_STATION}"
+                    }
+                    if (params.CERT_SERIAL) {
+                        extraVars << "cert_serial=${params.CERT_SERIAL}"
+                    }
+                    def extraVarsStr = extraVars.collect { "-e '${it}'" }.join(' ')
+
+                    sh """
+                        ansible-playbook \
+                            -i ${params.INVENTORY} \
+                            ${extraVarsStr} \
+                            --vault-password-file \${ANSIBLE_VAULT_PASSWORD_FILE} \
+                            playbooks/revoke.yml \
+                            | tee revocation_output.txt
+                    """
+                }
+            }
+        }
+
+        stage('Trigger CRL Refresh') {
+            steps {
+                sh """
+                    ansible-playbook \
+                        -i ${params.INVENTORY} \
+                        --vault-password-file \${ANSIBLE_VAULT_PASSWORD_FILE} \
+                        -e "target_host=\$(head -1 inventories/production/hosts.yml)" \
+                        playbooks/setup_crl_distribution.yml \
+                        --tags crl_refresh \
+                        | tee crl_refresh_output.txt
+                """
+            }
+        }
+
+        stage('Validate Revocation') {
+            steps {
+                script {
+                    def targetVars = ''
+                    if (params.TARGET_HOST) {
+                        targetVars = "-e target_host=${params.TARGET_HOST}"
+                    } else if (params.TARGET_STATION) {
+                        targetVars = "-e target_station=${params.TARGET_STATION}"
+                    }
+                    sh """
+                        ansible-playbook \
+                            -i ${params.INVENTORY} \
+                            ${targetVars} \
+                            --vault-password-file \${ANSIBLE_VAULT_PASSWORD_FILE} \
+                            playbooks/validate_all.yml \
+                            --tags revocation \
+                            | tee revocation_validation.txt
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '*.txt', allowEmptyArchive: true
+        }
+        success {
+            emailext(
+                subject: "Certificate Revoked: ${params.TARGET_HOST ?: params.TARGET_STATION} - Build #${env.BUILD_NUMBER}",
+                body: """
+                    Certificate revocation completed.
+                    Target: ${params.TARGET_HOST ?: params.TARGET_STATION}
+                    Reason: ${params.REVOCATION_REASON}
+                    Operator: ${currentBuild.rawBuild.getCause(hudson.model.Cause.UserIdCause)?.userId ?: 'unknown'}
+                    Build: ${env.BUILD_URL}
+                """,
+                to: 'pki-alerts@company.example,security@company.example'
+            )
+        }
+        failure {
+            emailext(
+                subject: "FAILED: Certificate Revocation - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: "Revocation pipeline FAILED. Immediate attention required.\n${env.BUILD_URL}",
+                to: 'pki-alerts@company.example,security@company.example'
+            )
+        }
+    }
+}

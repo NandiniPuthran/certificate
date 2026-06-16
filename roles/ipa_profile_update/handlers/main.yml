@@ -1,0 +1,33 @@
+---
+# roles/ipa_profile_update/handlers/main.yml
+
+- name: restart_dogtag_ca
+  ansible.builtin.systemd:
+    name: pki-tomcatd@pki-tomcat
+    state: restarted
+  delegate_to: "{{ ipa_signing_host }}"
+  listen: restart_dogtag_ca
+
+- name: restart_directory_server
+  ansible.builtin.systemd:
+    name: "dirsrv@{{ ipa_realm | replace('.', '-') }}"
+    state: restarted
+  delegate_to: "{{ ipa_signing_host }}"
+  listen: restart_directory_server
+
+- name: restart_ipa_services
+  ansible.builtin.command:
+    cmd: ipactl restart
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _ipactl_result
+  changed_when: true
+  listen: restart_ipa_services
+
+- name: validate_ipa_services
+  ansible.builtin.command:
+    cmd: ipactl status
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _ipactl_status
+  changed_when: false
+  failed_when: "'RUNNING' not in _ipactl_status.stdout"
+  listen: validate_ipa_services

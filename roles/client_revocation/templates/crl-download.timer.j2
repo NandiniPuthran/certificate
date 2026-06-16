@@ -1,0 +1,13 @@
+[Unit]
+Description=CRL Download Timer
+Documentation=https://wiki.company.example/pki/crl
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec={{ crl_refresh_interval_minutes }}min
+RandomizedDelaySec=120
+Persistent=true
+Unit=crl-download.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# {{ crl_export_dir }}/../crl-refresh.sh
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Copies the current IPA CRL to the Apache document root
+
+set -euo pipefail
+
+CRL_SOURCE="{{ crl_source_path }}"
+CRL_DEST="{{ crl_full_path }}"
+CRL_DER_DEST="{{ crl_export_dir }}/{{ crl_der_filename }}"
+LOG_TAG="crl-refresh"
+
+log() { logger -t "${LOG_TAG}" "$*"; }
+
+if [[ ! -f "${CRL_SOURCE}" ]]; then
+    log "ERROR: CRL source not found at ${CRL_SOURCE}"
+    exit 1
+fi
+
+# Validate source CRL before publishing
+if ! openssl crl -in "${CRL_SOURCE}" -noout 2>/dev/null; then
+    log "ERROR: Source CRL at ${CRL_SOURCE} is not valid PEM"
+    exit 1
+fi
+
+# Atomic replace using temp file
+TMP=$(mktemp -p "{{ crl_export_dir }}" crl.XXXXXX.pem)
+cp "${CRL_SOURCE}" "${TMP}"
+chown www-data:www-data "${TMP}"
+chmod 0644 "${TMP}"
+mv "${TMP}" "${CRL_DEST}"
+
+# Convert to DER
+openssl crl -in "${CRL_DEST}" -out "${CRL_DER_DEST}" -outform DER
+chown www-data:www-data "${CRL_DER_DEST}"
+chmod 0644 "${CRL_DER_DEST}"
+
+log "CRL refreshed: ${CRL_DEST}"
+log "CRL (DER) refreshed: ${CRL_DER_DEST}"

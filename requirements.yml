@@ -1,0 +1,14 @@
+---
+# requirements.yml
+# Ansible Galaxy collections required by this repository
+
+collections:
+  - name: community.crypto
+    version: ">=2.15.0"
+  - name: community.general
+    version: ">=7.0.0"
+  - name: ansible.posix
+    version: ">=1.5.0"
+
+# Install with:
+#   ansible-galaxy collection install -r requirements.yml

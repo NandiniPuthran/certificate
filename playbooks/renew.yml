@@ -1,0 +1,63 @@
+---
+# playbooks/renew.yml
+# Certificate Renewal Playbook
+#
+# Usage examples:
+#
+#   # Renew all certs due within threshold (default 30 days)
+#   ansible-playbook playbooks/renew.yml -i inventories/production/hosts.yml
+#
+#   # Renew a single device
+#   ansible-playbook playbooks/renew.yml -i inventories/production/hosts.yml \
+#     -e target_host=device01.station01.company.example
+#
+#   # Renew all devices in a station
+#   ansible-playbook playbooks/renew.yml -i inventories/production/hosts.yml \
+#     -e target_station=station01
+#
+#   # Force renew regardless of expiry
+#   ansible-playbook playbooks/renew.yml -i inventories/production/hosts.yml \
+#     -e renewal_force=true -e target_station=station01
+#
+#   # Custom threshold
+#   ansible-playbook playbooks/renew.yml -i inventories/production/hosts.yml \
+#     -e renewal_threshold_days=60
+
+- name: Certificate Renewal
+  hosts: >-
+    {{
+      target_host
+      if target_host is defined
+      else (target_station if target_station is defined else 'cert_targets')
+    }}
+  serial: "{{ renewal_serial | default('10%') }}"
+  gather_facts: true
+  become: true
+
+  pre_tasks:
+    - name: Validate target selection
+      ansible.builtin.debug:
+        msg: >-
+          Renewal target:
+          host={{ target_host | default('ALL') }},
+          station={{ target_station | default('ALL') }},
+          force={{ renewal_force | default(false) }},
+          threshold={{ renewal_threshold_days | default(30) }}d
+
+    - name: Gather minimal facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+          - date_time
+
+  roles:
+    - role: certificate_renewal
+      vars:
+        renewal_force: "{{ renewal_force | default(false) | bool }}"
+        renewal_threshold_days: "{{ renewal_threshold_days | default(30) | int }}"
+
+  post_tasks:
+    - name: Run client revocation checking configuration
+      ansible.builtin.include_role:
+        name: client_revocation
+      when: configure_revocation_checking | default(false) | bool

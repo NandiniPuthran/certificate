@@ -1,0 +1,54 @@
+---
+# roles/crl_distribution/tasks/refresh_crl.yml
+# Copies the latest CRL from IPA and publishes it
+
+- name: Check IPA CRL source exists
+  ansible.builtin.stat:
+    path: "{{ crl_source_path }}"
+  register: _crl_source_stat
+
+- name: Fail if IPA CRL source not found
+  ansible.builtin.fail:
+    msg: >-
+      IPA CRL not found at {{ crl_source_path }}.
+      Ensure this host is an IPA client and the CA is accessible.
+  when: not _crl_source_stat.stat.exists
+
+- name: Get CRL modification time
+  ansible.builtin.stat:
+    path: "{{ crl_source_path }}"
+  register: _crl_mtime
+
+- name: Copy CRL to distribution directory (PEM)
+  ansible.builtin.copy:
+    src: "{{ crl_source_path }}"
+    dest: "{{ crl_full_path }}"
+    remote_src: true
+    owner: www-data
+    group: www-data
+    mode: "0644"
+  register: _crl_published
+
+- name: Convert CRL to DER format for compatibility
+  ansible.builtin.command:
+    cmd: >
+      openssl crl
+        -in {{ crl_full_path | quote }}
+        -out {{ crl_export_dir }}/{{ crl_der_filename | quote }}
+        -outform DER
+  when: _crl_published.changed
+  changed_when: true
+
+- name: Set DER CRL permissions
+  ansible.builtin.file:
+    path: "{{ crl_export_dir }}/{{ crl_der_filename }}"
+    owner: www-data
+    group: www-data
+    mode: "0644"
+
+- name: Log CRL publication
+  ansible.builtin.debug:
+    msg: >-
+      CRL published to {{ crl_full_path }}.
+      Changed={{ _crl_published.changed }}.
+      Source mtime={{ _crl_mtime.stat.mtime }}.

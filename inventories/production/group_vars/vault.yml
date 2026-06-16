@@ -1,0 +1,8 @@
+---
+# inventories/production/group_vars/vault.yml
+# Encrypt with: ansible-vault encrypt inventories/production/group_vars/vault.yml
+#
+# All sensitive values prefixed with vault_ and referenced in group_vars/all.yml
+# as:  ipa_admin_password: "{{ vault_ipa_admin_password }}"
+
+vault_ipa_admin_password: "CHANGE_ME_ENCRYPT_WITH_VAULT"

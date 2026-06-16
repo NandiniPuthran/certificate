@@ -1,0 +1,51 @@
+---
+# roles/client_revocation/tasks/crl_client.yml
+# Sets up local CRL cache and periodic refresh on client hosts
+
+- name: Ensure CRL cache directory exists
+  ansible.builtin.file:
+    path: "{{ crl_local_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy CRL download script
+  ansible.builtin.template:
+    src: crl_download.sh.j2
+    dest: /usr/local/bin/crl-download.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Deploy CRL download systemd service
+  ansible.builtin.template:
+    src: crl-download.service.j2
+    dest: /etc/systemd/system/crl-download.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd_daemon_reload
+
+- name: Deploy CRL download systemd timer
+  ansible.builtin.template:
+    src: crl-download.timer.j2
+    dest: /etc/systemd/system/crl-download.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd_daemon_reload
+
+- name: Enable and start CRL download timer
+  ansible.builtin.systemd:
+    name: crl-download.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Run initial CRL download
+  ansible.builtin.command:
+    cmd: /usr/local/bin/crl-download.sh
+  register: _initial_crl_download
+  changed_when: true
+  failed_when: _initial_crl_download.rc != 0

@@ -1,0 +1,37 @@
+---
+# roles/certificate_renewal/handlers/main.yml
+
+- name: reload_docker
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  listen: reload_docker
+
+- name: reload_fluent_bit
+  ansible.builtin.systemd:
+    name: fluent-bit
+    state: reloaded
+  listen: reload_fluent_bit
+
+- name: reload_nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded
+  listen: reload_nginx
+
+- name: reload_apache2
+  ansible.builtin.systemd:
+    name: apache2
+    state: reloaded
+  listen: reload_apache2
+
+- name: reload_haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    state: reloaded
+  listen: reload_haproxy
+
+- name: update_ca_certificates
+  ansible.builtin.command:
+    cmd: update-ca-certificates
+  listen: update_ca_certificates

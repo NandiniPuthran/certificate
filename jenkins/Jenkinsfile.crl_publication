@@ -1,0 +1,61 @@
+// jenkins/Jenkinsfile.crl_publication
+// CRL Publication Pipeline
+// Runs every 4 hours to keep CRL distribution point current
+
+pipeline {
+    agent any
+
+    environment {
+        ANSIBLE_VAULT_PASSWORD_FILE = credentials('ansible-vault-password')
+        ANSIBLE_FORCE_COLOR         = '1'
+        ANSIBLE_HOST_KEY_CHECKING   = 'False'
+    }
+
+    parameters {
+        string(
+            name: 'INVENTORY',
+            defaultValue: 'inventories/production/hosts.yml',
+            description: 'Ansible inventory path'
+        )
+    }
+
+    triggers {
+        // Every 4 hours - matches IPA CRL generation interval
+        cron('0 */4 * * *')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Refresh and Validate CRL') {
+            steps {
+                sh """
+                    ansible-playbook \
+                        -i ${params.INVENTORY} \
+                        --vault-password-file \${ANSIBLE_VAULT_PASSWORD_FILE} \
+                        --limit ipa_clients \
+                        playbooks/setup_crl_distribution.yml \
+                        --tags crl_refresh,validate_crl \
+                        | tee crl_publication.txt
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'crl_publication.txt', allowEmptyArchive: true
+        }
+        failure {
+            emailext(
+                subject: "FAILED: CRL Publication - Build #${env.BUILD_NUMBER}",
+                body: "CRL publication FAILED. CRL may be stale.\n${env.BUILD_URL}",
+                to: 'pki-alerts@company.example'
+            )
+        }
+    }
+}

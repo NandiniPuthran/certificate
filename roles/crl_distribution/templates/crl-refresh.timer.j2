@@ -1,0 +1,15 @@
+[Unit]
+Description=CRL Distribution Refresh Timer
+Documentation=https://wiki.company.example/pki/crl
+
+[Timer]
+# Run every {{ crl_refresh_interval_minutes }} minutes, aligned to IPA CRL generation
+OnBootSec=2min
+OnUnitActiveSec={{ crl_refresh_interval_minutes }}min
+# Randomize within a 5-minute window to avoid thundering herd
+RandomizedDelaySec=300
+Unit=crl-refresh.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

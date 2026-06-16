@@ -1,0 +1,62 @@
+---
+# roles/client_revocation/tasks/app_docker.yml
+# Configures Docker daemon to trust IPA CA
+# Docker uses the system trust store for TLS validation of registry connections
+
+- name: Ensure Docker CA certificate directory exists
+  ansible.builtin.file:
+    path: /etc/docker/certs.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Read existing Docker daemon.json
+  ansible.builtin.slurp:
+    src: "{{ docker_daemon_json_path }}"
+  register: _docker_daemon_raw
+  failed_when: false
+
+- name: Parse existing Docker daemon config
+  ansible.builtin.set_fact:
+    _docker_daemon_config: >-
+      {{
+        (_docker_daemon_raw.content | b64decode | from_json)
+        if _docker_daemon_raw.content is defined
+        else {}
+      }}
+
+- name: Merge TLS verification settings into Docker daemon config
+  ansible.builtin.set_fact:
+    _docker_daemon_updated: >-
+      {{
+        _docker_daemon_config | combine({
+          'tls': true,
+          'tlsverify': true,
+          'tlscacert': ca_bundle_path
+        }, recursive=true)
+      }}
+
+- name: Write updated Docker daemon.json
+  ansible.builtin.copy:
+    content: "{{ _docker_daemon_updated | to_nice_json }}"
+    dest: "{{ docker_daemon_json_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart_docker
+
+- name: Copy IPA CA to Docker's well-known location
+  ansible.builtin.copy:
+    src: "{{ ca_bundle_path }}"
+    dest: /etc/docker/certs.d/ipa-ca.crt
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart_docker
+
+- name: Verify Docker service is running after config change
+  ansible.builtin.systemd:
+    name: "{{ docker_service_name }}"
+    state: started

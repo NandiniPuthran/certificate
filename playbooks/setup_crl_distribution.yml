@@ -1,0 +1,15 @@
+---
+# playbooks/setup_crl_distribution.yml
+# Sets up Apache CRL distribution server on IPA client host
+#
+# Usage:
+#   ansible-playbook playbooks/setup_crl_distribution.yml \
+#     -i inventories/production/hosts.yml
+
+- name: Setup CRL Distribution Point
+  hosts: ipa_clients
+  gather_facts: true
+  become: true
+
+  roles:
+    - role: crl_distribution

@@ -1,0 +1,38 @@
+---
+# roles/certificate_revocation/defaults/main.yml
+
+# ─── Revocation Settings ──────────────────────────────────────────────────────
+# Revocation reason (RFC 5280 reason codes 0-10, excluding 7)
+# 0=unspecified 1=keyCompromise 2=cACompromise 3=affiliationChanged
+# 4=superseded 5=cessationOfOperation 6=certificateHold
+revocation_reason: 0
+
+# Serial number(s) to revoke - set at runtime
+# cert_serial: ""             # single serial (hex)
+# cert_serials: []            # list of hex serials
+
+# ─── IPA Settings ─────────────────────────────────────────────────────────────
+ipa_signing_host: ipa-client01.company.example
+ipa_admin_user: admin
+ipa_admin_password: "{{ vault_ipa_admin_password }}"
+ipa_realm: COMPANY.EXAMPLE
+
+# ─── Certificate metadata store ───────────────────────────────────────────────
+# Path to serial number registry on controller/IPA host
+cert_serial_registry: /var/lib/ansible/cert_serials.json
+
+# ─── Post-revocation ──────────────────────────────────────────────────────────
+# Trigger CRL refresh after revocation
+revocation_trigger_crl_refresh: true
+
+# ─── Validation ───────────────────────────────────────────────────────────────
+# Validate revocation via OCSP after revoking
+revocation_validate_ocsp: true
+ocsp_uri: "http://ocsp.company.example"
+crl_distribution_uri: "http://crl.company.example/crl.pem"
+ca_bundle_path: /etc/ssl/company/ca/ipa-ca.crt
+
+# ─── Cert locations on target host ───────────────────────────────────────────
+cert_dir: /etc/ssl/company/certs
+cert_cn: "{{ inventory_hostname }}"
+cert_file: "{{ cert_dir }}/{{ cert_cn }}.crt"

@@ -1,0 +1,31 @@
+---
+# roles/client_revocation/tasks/app_fluent_bit.yml
+# Configures Fluent Bit TLS settings for IPA CA trust and revocation
+#
+# NOTE: Fluent Bit does NOT natively support CRL checking as of 3.x.
+# It relies on OpenSSL for TLS, so if the system OpenSSL is configured
+# for CRL checking, Fluent Bit benefits indirectly.
+# For strict revocation, use OCSP stapling at the server side.
+
+- name: Ensure Fluent Bit config directory exists
+  ansible.builtin.file:
+    path: "{{ fluent_bit_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy Fluent Bit TLS configuration snippet
+  ansible.builtin.template:
+    src: fluent_bit_tls.conf.j2
+    dest: "{{ fluent_bit_config_dir }}/tls.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload_fluent_bit
+
+- name: Verify Fluent Bit has access to CA bundle
+  ansible.builtin.stat:
+    path: "{{ ca_bundle_path }}"
+  register: _fb_ca_stat
+  failed_when: not _fb_ca_stat.stat.exists

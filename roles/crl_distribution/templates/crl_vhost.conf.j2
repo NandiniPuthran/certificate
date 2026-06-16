@@ -1,0 +1,56 @@
+# roles/crl_distribution/templates/crl_vhost.conf.j2
+# Apache virtual host for CRL distribution
+# Managed by Ansible - DO NOT EDIT MANUALLY
+
+<VirtualHost *:{{ crl_http_port }}>
+    ServerName {{ crl_fqdn }}
+    DocumentRoot {{ crl_export_dir }}
+
+    # Logging
+    ErrorLog  ${APACHE_LOG_DIR}/crl-distribution-error.log
+    CustomLog ${APACHE_LOG_DIR}/crl-distribution-access.log combined
+
+    <Directory {{ crl_export_dir }}>
+        Options -Indexes +FollowSymLinks
+        AllowOverride None
+        Require all granted
+
+        # Serve CRL with correct MIME type
+        AddType application/x-pkcs7-crl .crl
+        AddType application/pkix-crl    .pem
+        AddType application/pkix-crl    .der
+    </Directory>
+
+    # CORS for cross-origin CRL fetches (optional)
+    Header set Access-Control-Allow-Origin "*"
+    Header set Cache-Control "public, max-age=3600"
+
+    # Prevent HTML index of files not explicitly mapped
+    <FilesMatch "^(?!crl\.(pem|der|crl)$).*$">
+        Require all denied
+    </FilesMatch>
+</VirtualHost>
+
+{% if crl_enable_https %}
+<VirtualHost *:{{ crl_https_port }}>
+    ServerName {{ crl_fqdn }}
+    DocumentRoot {{ crl_export_dir }}
+
+    SSLEngine on
+    SSLCertificateFile    /etc/ssl/company/certs/{{ crl_fqdn }}.crt
+    SSLCertificateKeyFile /etc/ssl/company/private/{{ crl_fqdn }}.key
+    SSLCACertificateFile  /etc/ssl/company/ca/ipa-ca.crt
+
+    ErrorLog  ${APACHE_LOG_DIR}/crl-distribution-ssl-error.log
+    CustomLog ${APACHE_LOG_DIR}/crl-distribution-ssl-access.log combined
+
+    <Directory {{ crl_export_dir }}>
+        Options -Indexes
+        AllowOverride None
+        Require all granted
+        AddType application/x-pkcs7-crl .crl
+        AddType application/pkix-crl    .pem
+        AddType application/pkix-crl    .der
+    </Directory>
+</VirtualHost>
+{% endif %}

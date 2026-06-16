@@ -1,0 +1,30 @@
+---
+# playbooks/configure_client_revocation.yml
+# Configures revocation checking on all non-IPA certificate target hosts
+#
+# Usage:
+#   # All cert targets
+#   ansible-playbook playbooks/configure_client_revocation.yml \
+#     -i inventories/production/hosts.yml
+#
+#   # Single station
+#   ansible-playbook playbooks/configure_client_revocation.yml \
+#     -i inventories/production/hosts.yml \
+#     -e target_station=station01
+
+- name: Configure Client Revocation Checking
+  hosts: >-
+    {{
+      target_host
+      if target_host is defined
+      else (target_station if target_station is defined else 'cert_targets')
+    }}
+  gather_facts: true
+  become: true
+
+  roles:
+    - role: client_revocation
+      vars:
+        configure_docker: "{{ client_configure_docker | default(false) | bool }}"
+        configure_fluent_bit: "{{ client_configure_fluent_bit | default(false) | bool }}"
+        configure_openssl: "{{ client_configure_openssl | default(true) | bool }}"

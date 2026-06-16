@@ -1,0 +1,44 @@
+---
+# roles/ipa_profile_update/tasks/validate_profile.yml
+
+- name: Export updated profile for inspection
+  ansible.builtin.command:
+    cmd: >
+      ipa certprofile-show {{ ipa_cert_profile_id | quote }}
+        --out {{ profile_work_dir }}/{{ ipa_cert_profile_id }}_verify.cfg
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _profile_verify_export
+  changed_when: false
+  environment:
+    KRB5_CLIENT_KTNAME: /etc/krb5.keytab
+
+- name: Read verified profile
+  ansible.builtin.slurp:
+    src: "{{ profile_work_dir }}/{{ ipa_cert_profile_id }}_verify.cfg"
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _verified_profile_raw
+
+- name: Set verified profile content fact
+  ansible.builtin.set_fact:
+    _verified_profile: "{{ _verified_profile_raw.content | b64decode }}"
+
+- name: Assert CRL Distribution Point URI present in profile
+  ansible.builtin.assert:
+    that:
+      - crl_distribution_uri in _verified_profile
+    fail_msg: "CRL Distribution Point URI {{ crl_distribution_uri }} NOT found in updated profile!"
+    success_msg: "✓ CRL Distribution Point URI confirmed in profile."
+
+- name: Assert OCSP URI present in profile
+  ansible.builtin.assert:
+    that:
+      - ocsp_uri in _verified_profile
+    fail_msg: "OCSP URI {{ ocsp_uri }} NOT found in updated profile!"
+    success_msg: "✓ OCSP URI confirmed in profile."
+
+- name: Report profile update success
+  ansible.builtin.debug:
+    msg: >-
+      ✓ Profile {{ ipa_cert_profile_id }} updated successfully.
+      CRL DP: {{ crl_distribution_uri }}
+      OCSP: {{ ocsp_uri }}

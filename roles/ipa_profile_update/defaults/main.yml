@@ -1,0 +1,33 @@
+---
+# roles/ipa_profile_update/defaults/main.yml
+
+# ─── IPA Settings ─────────────────────────────────────────────────────────────
+ipa_signing_host: ipa-client01.company.example
+ipa_admin_user: admin
+ipa_admin_password: "{{ vault_ipa_admin_password }}"
+ipa_realm: COMPANY.EXAMPLE
+ipa_server: ipa01.company.example
+
+# ─── Certificate Profile ──────────────────────────────────────────────────────
+# The profile to modify
+ipa_cert_profile_id: caIPAserviceCert
+
+# Working directory for profile export/import
+profile_work_dir: /tmp/ansible_ipa_profile
+
+# Backup directory for original profile
+profile_backup_dir: /var/backups/ipa_profiles
+
+# ─── PKI Extension URIs ───────────────────────────────────────────────────────
+crl_distribution_uri: "http://crl.company.example/crl.pem"
+ocsp_uri: "http://ocsp.company.example"
+
+# ─── Services to restart after profile update ─────────────────────────────────
+# Handled via handlers but documented here for clarity
+ipa_services_requiring_restart:
+  - pki-tomcatd@pki-tomcat
+  - dirsrv@COMPANY-EXAMPLE
+  - ipa
+
+# ─── Validation ───────────────────────────────────────────────────────────────
+profile_validate_after_update: true

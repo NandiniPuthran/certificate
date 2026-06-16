@@ -1,0 +1,37 @@
+---
+# roles/crl_distribution/defaults/main.yml
+
+# ─── Apache Settings ──────────────────────────────────────────────────────────
+apache_package: apache2
+apache_service: apache2
+apache_config_dir: /etc/apache2
+apache_sites_available: /etc/apache2/sites-available
+apache_sites_enabled: /etc/apache2/sites-enabled
+apache_vhost_config: "{{ apache_sites_available }}/crl-distribution.conf"
+apache_document_root: /var/www/crl
+
+# ─── CRL Source and Distribution ─────────────────────────────────────────────
+# Where IPA writes the CRL on the IPA client host
+crl_source_path: /etc/ipa/ca.crl
+# Alternative: fetch directly from Dogtag
+dogtag_crl_url: "http://ipa01.company.example:8080/ca/ee/ca/getCRL?op=getCRL&crlIssuingPoint=MasterCRL&crlDisplayType=cachedCRL&submit=Submit"
+
+# Where we serve from
+crl_export_dir: /var/www/crl
+crl_filename: crl.pem
+crl_der_filename: crl.der     # some clients need DER format
+crl_full_path: "{{ crl_export_dir }}/{{ crl_filename }}"
+
+# ─── CRL Distribution FQDN ───────────────────────────────────────────────────
+crl_fqdn: crl.company.example
+crl_http_port: 80
+crl_https_port: 443
+crl_enable_https: false       # future: set true when TLS cert available
+
+# ─── Refresh Schedule ─────────────────────────────────────────────────────────
+# Systemd timer or cron interval for CRL sync
+crl_refresh_interval_minutes: 240   # every 4h - matches IPA CRL generation
+
+# ─── Validation ───────────────────────────────────────────────────────────────
+crl_validate_after_publish: true
+crl_max_age_hours: 5          # alert if CRL is older than this

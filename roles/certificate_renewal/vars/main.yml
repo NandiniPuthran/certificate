@@ -1,0 +1,16 @@
+---
+# roles/certificate_renewal/vars/main.yml
+# Internal/computed variables - not intended for end-user override
+
+# Derived cert naming
+_cert_basename: "{{ cert_cn | replace('.', '_') }}"
+
+# Timestamp for backups
+_renewal_timestamp: "{{ ansible_date_time.epoch }}"
+
+# Staging paths on IPA signing host (per-host namespaced to avoid collision)
+_ipa_csr_remote: "{{ ipa_signing_csr_dir }}/{{ cert_cn }}.csr"
+_ipa_cert_remote: "{{ ipa_signing_cert_dir }}/{{ cert_cn }}.crt"
+
+# Threshold in seconds for openssl date comparison
+_threshold_seconds: "{{ renewal_threshold_days | int * 86400 }}"

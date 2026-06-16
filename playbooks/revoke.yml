@@ -1,0 +1,71 @@
+---
+# playbooks/revoke.yml
+# Certificate Revocation Playbook
+#
+# IMPORTANT: Revocation is IRREVERSIBLE (except certificateHold).
+# Always confirm the correct serial number before running.
+#
+# Usage examples:
+#
+#   # Revoke certificate by serial (hex)
+#   ansible-playbook playbooks/revoke.yml \
+#     -i inventories/production/hosts.yml \
+#     -e "cert_serial=1A2B3C4D" \
+#     -e "target_host=device01.station01.company.example"
+#
+#   # Revoke all certs for a station (discovers serials from hosts)
+#   ansible-playbook playbooks/revoke.yml \
+#     -i inventories/production/hosts.yml \
+#     -e "target_station=station01" \
+#     -e "revocation_reason=4"
+#
+#   # Revoke with explicit reason (cessationOfOperation)
+#   ansible-playbook playbooks/revoke.yml \
+#     -i inventories/production/hosts.yml \
+#     -e "target_host=device01.station01.company.example" \
+#     -e "revocation_reason=5"
+
+- name: Certificate Revocation - Discover Serials
+  hosts: >-
+    {{
+      target_host
+      if target_host is defined
+      else (target_station if target_station is defined else 'cert_targets')
+    }}
+  gather_facts: false
+  become: true
+
+  pre_tasks:
+    - name: WARN - Revocation is irreversible
+      ansible.builtin.pause:
+        prompt: >-
+          WARNING: You are about to REVOKE certificates.
+          This action is IRREVERSIBLE (except reason=certificateHold).
+          Targets: {{ ansible_play_hosts | join(', ') }}
+          Reason code: {{ revocation_reason | default(0) }}
+          Type 'yes' to confirm, anything else to abort.
+      register: _revoke_confirm
+      run_once: true
+      when: not (revocation_skip_confirm | default(false) | bool)
+
+    - name: Abort if not confirmed
+      ansible.builtin.fail:
+        msg: "Revocation aborted by operator."
+      when:
+        - not (revocation_skip_confirm | default(false) | bool)
+        - _revoke_confirm.user_input | lower != 'yes'
+      run_once: true
+
+    - name: Discover certificate serial from host
+      ansible.builtin.include_role:
+        name: certificate_revocation
+        tasks_from: lookup_serial_from_host.yml
+      when: cert_serial is not defined
+
+  tasks:
+    - name: Execute revocation
+      ansible.builtin.include_role:
+        name: certificate_revocation
+      vars:
+        cert_serial: "{{ cert_serial | default(hostvars[inventory_hostname].cert_serial) }}"
+        revocation_reason: "{{ revocation_reason | default(0) | int }}"

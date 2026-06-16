@@ -1,0 +1,47 @@
+---
+# roles/client_revocation/tasks/ca_trust.yml
+# Installs IPA CA into Debian system trust store
+
+- name: Ensure CA directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ ca_bundle_path | dirname }}"
+    - "{{ ca_trust_store_dir }}"
+
+- name: Fetch IPA CA cert from signing host
+  ansible.builtin.slurp:
+    src: "{{ ipa_ca_cert_path }}"
+  delegate_to: "{{ ipa_signing_host }}"
+  register: _ipa_ca_slurp
+
+- name: Deploy IPA CA cert to company bundle path
+  ansible.builtin.copy:
+    content: "{{ _ipa_ca_slurp.content | b64decode }}"
+    dest: "{{ ca_bundle_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy IPA CA to system trust store
+  ansible.builtin.copy:
+    content: "{{ _ipa_ca_slurp.content | b64decode }}"
+    dest: "{{ ca_trust_store_dir }}/{{ ca_trust_filename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: update_ca_certificates
+
+- name: Run update-ca-certificates immediately if CA was changed
+  ansible.builtin.command:
+    cmd: update-ca-certificates
+  when: >-
+    (ca_bundle_path | dirname) is changed
+    or (ca_trust_store_dir ~ '/' ~ ca_trust_filename) is changed
+  changed_when: true
+  register: _update_ca_result
+  failed_when: _update_ca_result.rc != 0

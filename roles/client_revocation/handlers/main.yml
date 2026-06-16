@@ -1,0 +1,25 @@
+---
+# roles/client_revocation/handlers/main.yml
+
+- name: update_ca_certificates
+  ansible.builtin.command:
+    cmd: update-ca-certificates
+  listen: update_ca_certificates
+  changed_when: true
+
+- name: restart_docker
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  listen: restart_docker
+
+- name: reload_fluent_bit
+  ansible.builtin.systemd:
+    name: fluent-bit
+    state: reloaded
+  listen: reload_fluent_bit
+
+- name: systemd_daemon_reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: systemd_daemon_reload
