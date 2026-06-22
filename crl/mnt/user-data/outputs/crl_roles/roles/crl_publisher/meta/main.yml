@@ -1,0 +1,12 @@
+---
+# roles/crl_publisher/meta/main.yml
+galaxy_info:
+  role_name: crl_publisher
+  description: >
+    Installs Apache on the IT server and configures it to serve a
+    locally-cached copy of FreeIPA's CRL, kept fresh via a scheduled
+    fetch script. Intended to run ONLY on the IT server (the one host
+    with direct reachability to FreeIPA).
+  min_ansible_version: "2.14"
+
+dependencies: []

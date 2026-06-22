@@ -1,0 +1,46 @@
+---
+# roles/crl_publisher/defaults/main.yml
+#
+# Variables for the IT server's CRL publishing role.
+# This role:
+#   1. Installs and configures Apache to serve a local CRL copy
+#   2. Installs a script + systemd timer that pulls the CRL from
+#      FreeIPA on a schedule and publishes it for downstream hosts
+#
+# Override these in inventory group_vars/host_vars as needed.
+
+# ── Source (FreeIPA) ────────────────────────────────────────────────────────
+crl_publisher_freeipa_server: "freeipa-server.example.com"
+crl_publisher_freeipa_crl_path: "/ipa/crl/MasterCRL.bin"
+
+# ── Apache serving config ───────────────────────────────────────────────────
+crl_publisher_apache_docroot: "/var/www/html"
+crl_publisher_crl_subdir: "crl"
+crl_publisher_apache_port: 8443
+crl_publisher_server_name: "{{ ansible_fqdn | default(ansible_host) }}"
+
+# Self-signed cert for the Apache vhost itself (this is just the transport
+# layer for serving the CRL file — not related to the CRL's own CA chain)
+crl_publisher_vhost_cert_path: "/etc/apache2/crl_publisher/server.crt"
+crl_publisher_vhost_key_path: "/etc/apache2/crl_publisher/server.key"
+crl_publisher_vhost_cert_days: 825   # ~2.25 years, renew via separate process
+
+# ── Fetch script + scheduling ───────────────────────────────────────────────
+crl_publisher_script_path: "/usr/local/bin/fetch_and_publish_crl.sh"
+crl_publisher_log_path: "/var/log/crl_fetch.log"
+crl_publisher_lock_path: "/var/run/crl_fetch.lock"
+
+# Fetch interval — should be roughly half of FreeIPA's CRL validity window.
+# Confirmed observed window: 4 hours (lastUpdate 13:00 / nextUpdate 17:00).
+# OnCalendar syntax: every 2 hours, on the hour.
+crl_publisher_fetch_interval_oncalendar: "*-*-* 00/2:00:00"
+crl_publisher_randomized_delay_sec: 300
+
+# curl timeouts
+crl_publisher_curl_connect_timeout: 10
+crl_publisher_curl_max_time: 30
+
+# Warn threshold — if freshly downloaded CRL has less than this many
+# minutes of validity left, log a warning (may indicate pull interval
+# needs tightening relative to FreeIPA's actual refresh cadence)
+crl_publisher_freshness_warn_minutes: 30

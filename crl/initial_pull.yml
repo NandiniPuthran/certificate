@@ -1,0 +1,18 @@
+---
+# roles/crl_consumer/tasks/initial_pull.yml
+#
+# Runs the pull script once immediately after deployment, so any
+# application/SSSD role applied afterward in the same playbook run
+# has a real local CRL file to point at, rather than waiting for
+# the first scheduled timer run.
+
+- name: Run initial CRL pull
+  ansible.builtin.command:
+    cmd: "{{ crl_consumer_script_path }}"
+  register: crl_consumer_initial_pull
+  changed_when: "'Local CRL updated' in crl_consumer_initial_pull.stdout"
+  failed_when: crl_consumer_initial_pull.rc != 0
+
+- name: Show initial pull result
+  ansible.builtin.debug:
+    msg: "{{ crl_consumer_initial_pull.stdout_lines }}"

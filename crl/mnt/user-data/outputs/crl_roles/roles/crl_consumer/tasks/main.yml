@@ -1,0 +1,16 @@
+---
+# roles/crl_consumer/tasks/main.yml
+#
+# Orchestrates the target host's CRL pull setup.
+
+- name: Deploy CRL pull script and scheduling
+  ansible.builtin.import_tasks: pull_script_setup.yml
+  tags: [crl_consumer, pull]
+
+- name: Run initial CRL pull so local file exists immediately
+  ansible.builtin.import_tasks: initial_pull.yml
+  tags: [crl_consumer, pull, initial]
+
+- name: Export local CRL path as a fact for other roles to consume
+  ansible.builtin.import_tasks: export_facts.yml
+  tags: [crl_consumer, facts]

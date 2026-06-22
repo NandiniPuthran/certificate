@@ -1,0 +1,26 @@
+---
+# roles/crl_consumer/tasks/export_facts.yml
+#
+# This role's only job is keeping a fresh CRL file on disk — it does
+# NOT know or care which application/SSSD config should point at it.
+# That decision belongs to whichever role configures cert validation
+# for a given application (e.g. an "apache_mtls" role, or the SSSD
+# config task in the certificate role).
+#
+# This task exports the resolved path as a fact, so those other
+# roles can reference {{ crl_local_path }} instead of hardcoding
+# the path a second time and risking drift between the two roles.
+
+- name: Export resolved local CRL path as a shared fact
+  ansible.builtin.set_fact:
+    crl_local_path: "{{ crl_consumer_local_crl_dir }}/{{ crl_consumer_local_crl_filename }}"
+    cacheable: true
+
+- name: Confirm exported fact
+  ansible.builtin.debug:
+    msg: >-
+      crl_local_path is now set to {{ crl_local_path }}.
+      Application/SSSD roles should reference this fact rather than
+      hardcoding the path, e.g.:
+        SSLCARevocationFile {{ crl_local_path }}
+        crl_file = {{ crl_local_path }}

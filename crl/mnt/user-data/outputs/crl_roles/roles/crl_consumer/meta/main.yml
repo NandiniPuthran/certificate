@@ -1,0 +1,13 @@
+---
+# roles/crl_consumer/meta/main.yml
+galaxy_info:
+  role_name: crl_consumer
+  description: >
+    Deploys a scheduled pull mechanism on non-FreeIPA target hosts
+    that fetches the CRL from the IT server's Apache instance (NOT
+    FreeIPA directly — these hosts have no FreeIPA reachability by
+    design). Exports crl_local_path as a fact for application/SSSD
+    roles to consume; does not configure any application itself.
+  min_ansible_version: "2.14"
+
+dependencies: []

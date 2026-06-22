@@ -1,0 +1,6 @@
+---
+# roles/crl_consumer/handlers/main.yml
+
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true

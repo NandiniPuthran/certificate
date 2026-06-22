@@ -1,0 +1,17 @@
+---
+# roles/crl_publisher/tasks/initial_fetch.yml
+#
+# Runs the fetch script once immediately after deployment, so the
+# CRL is populated right away rather than waiting up to the full
+# timer interval for the first run.
+
+- name: Run initial CRL fetch
+  ansible.builtin.command:
+    cmd: "{{ crl_publisher_script_path }}"
+  register: crl_publisher_initial_fetch
+  changed_when: "'CRL published successfully' in crl_publisher_initial_fetch.stdout"
+  failed_when: crl_publisher_initial_fetch.rc != 0
+
+- name: Show initial fetch result
+  ansible.builtin.debug:
+    msg: "{{ crl_publisher_initial_fetch.stdout_lines }}"

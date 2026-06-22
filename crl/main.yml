@@ -1,0 +1,18 @@
+---
+# roles/crl_publisher/tasks/main.yml
+#
+# Orchestrates the IT server's CRL publishing setup.
+# Split into focused task files rather than one large file —
+# each does exactly one job and can be tagged/run independently.
+
+- name: Install and configure Apache for CRL serving
+  ansible.builtin.import_tasks: apache_setup.yml
+  tags: [crl_publisher, apache]
+
+- name: Deploy CRL fetch script and scheduling
+  ansible.builtin.import_tasks: fetch_script_setup.yml
+  tags: [crl_publisher, fetch]
+
+- name: Run initial CRL fetch to populate Apache docroot
+  ansible.builtin.import_tasks: initial_fetch.yml
+  tags: [crl_publisher, fetch, initial]

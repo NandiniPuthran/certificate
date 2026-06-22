@@ -1,0 +1,56 @@
+---
+# roles/crl_consumer/tasks/pull_script_setup.yml
+#
+# Deploys the CRL pull script plus its systemd service/timer.
+# This runs on every non-FreeIPA target host, fetching from the
+# IT server's Apache (not FreeIPA directly — these hosts can't
+# reach FreeIPA at all, by design).
+
+- name: Create local CRL directory
+  ansible.builtin.file:
+    path: "{{ crl_consumer_local_crl_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Deploy CRL pull script
+  ansible.builtin.template:
+    src: fetch_crl_from_it_server.sh.j2
+    dest: "{{ crl_consumer_script_path }}"
+    mode: "0750"
+    owner: root
+    group: root
+
+- name: Create log file with correct permissions
+  ansible.builtin.file:
+    path: "{{ crl_consumer_log_path }}"
+    state: touch
+    mode: "0644"
+    owner: root
+    group: root
+    access_time: preserve
+    modification_time: preserve
+
+- name: Deploy systemd service unit
+  ansible.builtin.template:
+    src: crl-pull.service.j2
+    dest: /etc/systemd/system/crl-pull.service
+    mode: "0644"
+  notify: reload systemd
+
+- name: Deploy systemd timer unit
+  ansible.builtin.template:
+    src: crl-pull.timer.j2
+    dest: /etc/systemd/system/crl-pull.timer
+    mode: "0644"
+  notify: reload systemd
+
+- name: Flush handlers so systemd picks up new units before enabling
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the CRL pull timer
+  ansible.builtin.systemd:
+    name: crl-pull.timer
+    enabled: true
+    state: started

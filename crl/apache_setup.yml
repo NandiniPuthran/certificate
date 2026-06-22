@@ -1,0 +1,141 @@
+---
+# roles/crl_publisher/tasks/apache_setup.yml
+#
+# Installs Apache and configures a vhost to serve the CRL directory.
+# This is the static file-serving side — separate from the fetch
+# script, which is responsible for keeping the served file fresh.
+
+- name: Detect package manager family
+  ansible.builtin.set_fact:
+    crl_publisher_is_debian_family: "{{ ansible_os_family == 'Debian' }}"
+
+- name: Install Apache (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: apache2
+    state: present
+    update_cache: true
+  when: crl_publisher_is_debian_family
+
+- name: Install Apache (RHEL/CentOS)
+  ansible.builtin.yum:
+    name: httpd
+    state: present
+  when: not crl_publisher_is_debian_family
+
+- name: Install mod_ssl (RHEL/CentOS)
+  ansible.builtin.yum:
+    name: mod_ssl
+    state: present
+  when: not crl_publisher_is_debian_family
+
+- name: Enable Apache SSL module (Debian/Ubuntu)
+  community.general.apache2_module:
+    name: ssl
+    state: present
+  when: crl_publisher_is_debian_family
+  notify: restart apache
+
+- name: Set Apache service name fact
+  ansible.builtin.set_fact:
+    crl_publisher_apache_service: "{{ 'apache2' if crl_publisher_is_debian_family else 'httpd' }}"
+
+- name: Ensure Apache is enabled and started
+  ansible.builtin.systemd:
+    name: "{{ crl_publisher_apache_service }}"
+    enabled: true
+    state: started
+
+# ── CRL serving directory ───────────────────────────────────────────────────
+
+- name: Create CRL serving directory
+  ansible.builtin.file:
+    path: "{{ crl_publisher_apache_docroot }}/{{ crl_publisher_crl_subdir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+# ── Vhost transport certificate (self-signed, for serving the CRL over TLS) ─
+# Note: this cert secures the TRANSPORT to fetch the CRL file. It is
+# unrelated to the FreeIPA CA chain that the CRL itself belongs to.
+
+- name: Create directory for vhost certificate
+  ansible.builtin.file:
+    path: "{{ crl_publisher_vhost_cert_path | dirname }}"
+    state: directory
+    mode: "0750"
+
+- name: Check if vhost certificate already exists
+  ansible.builtin.stat:
+    path: "{{ crl_publisher_vhost_cert_path }}"
+  register: crl_publisher_vhost_cert_stat
+
+- name: Generate self-signed vhost certificate (only if missing)
+  ansible.builtin.command:
+    cmd: >
+      openssl req -x509 -newkey rsa:2048
+      -keyout {{ crl_publisher_vhost_key_path }}
+      -out {{ crl_publisher_vhost_cert_path }}
+      -days {{ crl_publisher_vhost_cert_days }}
+      -nodes
+      -subj "/CN={{ crl_publisher_server_name }}"
+  when: not crl_publisher_vhost_cert_stat.stat.exists
+  notify: restart apache
+
+- name: Set vhost key permissions
+  ansible.builtin.file:
+    path: "{{ crl_publisher_vhost_key_path }}"
+    mode: "0600"
+    owner: root
+    group: root
+
+- name: Set vhost cert permissions
+  ansible.builtin.file:
+    path: "{{ crl_publisher_vhost_cert_path }}"
+    mode: "0644"
+    owner: root
+    group: root
+
+# ── Vhost config ─────────────────────────────────────────────────────────────
+
+- name: Deploy CRL serving vhost (Debian/Ubuntu)
+  ansible.builtin.template:
+    src: crl_publisher_vhost.conf.j2
+    dest: "/etc/apache2/sites-available/crl_publisher.conf"
+    mode: "0644"
+  when: crl_publisher_is_debian_family
+  notify: restart apache
+
+- name: Enable CRL serving vhost (Debian/Ubuntu)
+  ansible.builtin.command:
+    cmd: a2ensite crl_publisher.conf
+    creates: /etc/apache2/sites-enabled/crl_publisher.conf
+  when: crl_publisher_is_debian_family
+  notify: restart apache
+
+- name: Deploy CRL serving vhost (RHEL/CentOS)
+  ansible.builtin.template:
+    src: crl_publisher_vhost.conf.j2
+    dest: "/etc/httpd/conf.d/crl_publisher.conf"
+    mode: "0644"
+  when: not crl_publisher_is_debian_family
+  notify: restart apache
+
+# ── Validate config before any restart actually happens ──────────────────────
+
+- name: Validate Apache config (Debian/Ubuntu)
+  ansible.builtin.command: apache2ctl configtest
+  when: crl_publisher_is_debian_family
+  changed_when: false
+
+- name: Validate Apache config (RHEL/CentOS)
+  ansible.builtin.command: httpd -t
+  when: not crl_publisher_is_debian_family
+  changed_when: false
+
+- name: Ensure SELinux context is correct on CRL directory (RHEL/CentOS)
+  ansible.builtin.command:
+    cmd: "restorecon -Rv {{ crl_publisher_apache_docroot }}/{{ crl_publisher_crl_subdir }}"
+  when: not crl_publisher_is_debian_family
+  changed_when: false
+  failed_when: false

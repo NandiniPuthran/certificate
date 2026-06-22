@@ -1,0 +1,50 @@
+---
+# roles/crl_consumer/defaults/main.yml
+#
+# Variables for the non-FreeIPA target host's CRL pull role.
+# This role:
+#   1. Installs a script that pulls the CRL from the IT server's
+#      Apache instance on a schedule
+#   2. Schedules it via systemd timer
+#   3. Leaves the local CRL at a fixed, predictable path that
+#      application/SSSD config (configured by OTHER roles) points at
+#
+# This role does NOT configure SSSD or any application's CRL
+# parameter — it only guarantees a fresh local file exists at
+# crl_consumer_local_crl_path. Pointing applications at that path
+# is each application role's own responsibility.
+
+# ── Source (IT server) ──────────────────────────────────────────────────────
+crl_consumer_it_server: "it-server.example.com"
+crl_consumer_it_server_port: 8443
+crl_consumer_it_server_crl_subdir: "crl"
+crl_consumer_remote_crl_filename: "ca.crl.pem"   # PEM — matches what crl_publisher maintains
+
+# ── Local destination ────────────────────────────────────────────────────────
+# This is the path application/SSSD roles should reference.
+crl_consumer_local_crl_dir: "/etc/pki/CA/crl"
+crl_consumer_local_crl_filename: "ca.crl.pem"
+
+# ── Script + scheduling ──────────────────────────────────────────────────────
+crl_consumer_script_path: "/usr/local/bin/fetch_crl_from_it_server.sh"
+crl_consumer_log_path: "/var/log/crl_pull.log"
+crl_consumer_lock_path: "/var/run/crl_pull.lock"
+
+# Pull interval — should match or be tighter than crl_publisher's own
+# fetch interval upstream, so this host isn't waiting on a stale
+# upstream copy. Default: every 2 hours, offset by 15 minutes from
+# the top of the hour so it doesn't race the publisher's own refresh.
+crl_consumer_pull_interval_oncalendar: "*-*-* 00/2:15:00"
+crl_consumer_randomized_delay_sec: 300
+
+crl_consumer_curl_connect_timeout: 10
+crl_consumer_curl_max_time: 30
+
+crl_consumer_freshness_warn_minutes: 30
+
+# ── Reload behaviour ─────────────────────────────────────────────────────────
+# Services to reload ONLY if the CRL content actually changed.
+# Populate this from the application role(s) that consume the CRL —
+# left empty by default since this role doesn't know what's installed
+# on a given host.
+crl_consumer_services_to_reload: []

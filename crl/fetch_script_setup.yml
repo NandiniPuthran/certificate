@@ -1,0 +1,47 @@
+---
+# roles/crl_publisher/tasks/fetch_script_setup.yml
+#
+# Deploys the CRL fetch-and-publish script plus its systemd
+# service/timer. This is the piece that keeps the Apache-served
+# CRL fresh by re-pulling from FreeIPA on a schedule.
+
+- name: Deploy CRL fetch-and-publish script
+  ansible.builtin.template:
+    src: fetch_and_publish_crl.sh.j2
+    dest: "{{ crl_publisher_script_path }}"
+    mode: "0750"
+    owner: root
+    group: root
+
+- name: Create log file with correct permissions
+  ansible.builtin.file:
+    path: "{{ crl_publisher_log_path }}"
+    state: touch
+    mode: "0644"
+    owner: root
+    group: root
+    access_time: preserve
+    modification_time: preserve
+
+- name: Deploy systemd service unit
+  ansible.builtin.template:
+    src: crl-fetch.service.j2
+    dest: /etc/systemd/system/crl-fetch.service
+    mode: "0644"
+  notify: reload systemd
+
+- name: Deploy systemd timer unit
+  ansible.builtin.template:
+    src: crl-fetch.timer.j2
+    dest: /etc/systemd/system/crl-fetch.timer
+    mode: "0644"
+  notify: reload systemd
+
+- name: Flush handlers so systemd picks up new units before enabling
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the CRL fetch timer
+  ansible.builtin.systemd:
+    name: crl-fetch.timer
+    enabled: true
+    state: started
