@@ -1,0 +1,69 @@
+# roles/validation/tasks/main.yml
+# Comprehensive CRL system validation
+
+---
+
+- name: "Validate CRL system"
+  block:
+    - name: "Test CRL server accessibility"
+      ansible.builtin.get_url:
+        url: "http://{{ validation_crl_server }}/crl/ca.crl"
+        dest: /tmp/validation-crl.crl
+        timeout: "{{ validation_download_timeout }}"
+      register: crl_download_test
+      tags:
+        - validation
+        - download
+
+    - name: "Validate CRL format"
+      ansible.builtin.command:
+        cmd: "openssl crl -in /tmp/validation-crl.crl -noout -text"
+        timeout: 30
+      changed_when: false
+      tags:
+        - validation
+        - format
+
+    - name: "Verify CRL on client"
+      ansible.builtin.stat:
+        path: /etc/crl/ca.crl
+      register: client_crl_stat
+      failed_when: not client_crl_stat.stat.exists
+      tags:
+        - validation
+        - client
+
+    - name: "Check CRL age on client"
+      ansible.builtin.shell:
+        cmd: |
+          age_minutes=$(( ($(date +%s) - $(stat -c %Y /etc/crl/ca.crl)) / 60 ))
+          echo $age_minutes
+        timeout: 10
+      changed_when: false
+      register: crl_age_minutes
+      tags:
+        - validation
+        - client
+
+    - name: "Display validation results"
+      ansible.builtin.debug:
+        msg: |
+          ✅ CRL System Validation Results:
+          - CRL Server: ACCESSIBLE
+          - CRL Format: VALID
+          - Client CRL: PRESENT
+          - CRL Age: {{ crl_age_minutes.stdout }} minutes
+          - Status: PASS
+      tags:
+        - validation
+        - debug
+
+  rescue:
+    - name: "Validation failed"
+      ansible.builtin.fail:
+        msg: "CRL system validation failed"
+      tags:
+        - validation
+
+  tags:
+    - validation

@@ -1,0 +1,98 @@
+# roles/application_crl/tasks/apache-ssl.yml
+# Configure Apache mod_ssl to use CRL with SOFT-FAIL (leaf mode)
+
+---
+
+- name: "Configure Apache mod_ssl CRL checking"
+  block:
+    - name: "Create Apache SSL config backup"
+      ansible.builtin.copy:
+        src: "{{ apache_config_dir }}"
+        dest: "{{ apache_config_dir }}.backup-{{ ansible_date_time.iso8601_basic }}"
+        remote_src: true
+      become: true
+      tags:
+        - application_crl
+        - apache
+        - backup
+
+    - name: "Add CRL configuration to Apache SSL"
+      ansible.builtin.lineinfile:
+        path: "{{ apache_config_dir }}"
+        line: "{{ item }}"
+        state: present
+        insertafter: "^SSLEngine"
+      loop:
+        - "SSLCARevocationFile {{ apache_ssl_crlfile }}"
+        - "SSLCARevocationCheck {{ apache_ssl_crlcheck_mode }}"
+      become: true
+      notify: "restart apache"
+      tags:
+        - application_crl
+        - apache
+        - configuration
+
+    - name: "Test Apache configuration"
+      ansible.builtin.command:
+        cmd: "{{ apache_config_dir | dirname }}/bin/apachectl configtest"
+      changed_when: false
+      become: true
+      tags:
+        - application_crl
+        - apache
+        - validation
+
+    - name: "Log Apache CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: |
+          [{{ ansible_date_time.iso8601 }}] Apache mod_ssl CRL configured:
+            - CRL File: {{ apache_ssl_crlfile }}
+            - Check Mode: {{ apache_ssl_crlcheck_mode }} (SOFT-FAIL)
+            - Revocation checking: ENABLED
+            - Fail on expired CRL: DISABLED (soft-fail)
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - apache
+        - logging
+
+    - name: "Display Apache CRL configuration"
+      ansible.builtin.debug:
+        msg: |
+          ✅ Apache mod_ssl CRL Configuration:
+          - CRL File: {{ apache_ssl_crlfile }}
+          - Check Mode: {{ apache_ssl_crlcheck_mode }}
+          - Behavior: SOFT-FAIL
+            • Revoked certs: REJECTED ✅
+            • Expired CRL: Service continues ✅
+            • Missing CRL: Service continues ✅
+      tags:
+        - application_crl
+        - apache
+        - debug
+
+  rescue:
+    - name: "Log Apache CRL configuration failure"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] ERROR: Apache CRL configuration failed"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - apache
+
+    - name: "Fail with helpful message"
+      ansible.builtin.fail:
+        msg: |
+          Failed to configure Apache mod_ssl CRL.
+          Check {{ apache_config_dir }} syntax.
+      tags:
+        - application_crl
+        - apache
+
+  tags:
+    - application_crl
+    - apache

@@ -1,0 +1,63 @@
+# roles/application_crl/handlers/main.yml
+
+---
+
+- name: "restart apache"
+  ansible.builtin.systemd:
+    name: httpd
+    state: restarted
+  become: true
+  listen: "restart apache"
+  tags:
+    - application_crl
+    - handlers
+
+- name: "restart haproxy"
+  ansible.builtin.systemd:
+    name: haproxy
+    state: restarted
+  become: true
+  listen: "restart haproxy"
+  tags:
+    - application_crl
+    - handlers
+
+- name: "restart sssd"
+  ansible.builtin.systemd:
+    name: sssd
+    state: restarted
+  become: true
+  listen: "restart sssd"
+  tags:
+    - application_crl
+    - handlers
+
+- name: "restart rsyslog"
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted
+  become: true
+  listen: "restart rsyslog"
+  tags:
+    - application_crl
+    - handlers
+
+- name: "restart etcd"
+  ansible.builtin.systemd:
+    name: etcd
+    state: restarted
+  become: true
+  listen: "restart etcd"
+  tags:
+    - application_crl
+    - handlers
+
+- name: "restart freeradius"
+  ansible.builtin.systemd:
+    name: radiusd
+    state: restarted
+  become: true
+  listen: "restart freeradius"
+  tags:
+    - application_crl
+    - handlers

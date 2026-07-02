@@ -1,0 +1,55 @@
+# playbooks/deploy-crl-consumer.yml
+# Deploy CRL consumers (clients + application config)
+
+---
+
+- name: "Deploy CRL Consumer Servers"
+  hosts: app_servers
+  become: true
+  gather_facts: true
+  
+  tasks:
+    - name: "CRL Client Distribution (Every 2 hours)"
+      ansible.builtin.include_role:
+        name: crl_client
+      tags:
+        - crl_consumer
+        - crl_client
+
+    - name: "Application CRL Configuration (Soft-Fail)"
+      ansible.builtin.include_role:
+        name: application_crl
+      tags:
+        - crl_consumer
+        - application_crl
+
+    - name: "Deployment Summary"
+      ansible.builtin.debug:
+        msg: |
+          ✅ CRL Consumer Deployed Successfully
+          
+          CRL Client:
+          - Download: Every 2 hours from CRL server
+          - Location: /etc/crl/ca.crl
+          - Validation: Format + expiration
+          - Strategy: Soft-fail (alert but continue)
+          
+          Application Configuration:
+          - Apache: SSLCARevocationCheck leaf (soft-fail)
+          - HAProxy: crl-file configured
+          - SSSD: TLS_CRLFILE in ldap.conf
+          - rsyslog: ossl driver with CRL
+          - etcd: client-crl-file configured
+          - FreeRADIUS: CRL in EAP-TLS config
+          
+          Soft-Fail Behavior:
+          ✅ Revoked certs: REJECTED
+          ✅ Expired CRL: Service continues
+          ✅ Alert admin: On stale CRL
+          
+          Logs:
+          - /var/log/crl-management/crl-client.log
+          - /var/log/crl-management/application-crl.log
+      tags:
+        - crl_consumer
+        - debug

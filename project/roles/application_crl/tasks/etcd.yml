@@ -1,0 +1,40 @@
+# roles/application_crl/tasks/etcd.yml
+# Configure etcd with CRL validation
+
+---
+
+- name: "Configure etcd CRL"
+  block:
+    - name: "Add CRL to etcd configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ etcd_config_file }}"
+        line: "  client-crl-file: {{ etcd_crl_file }}"
+        state: present
+        insertafter: "^security:"
+      become: true
+      notify: "restart etcd"
+      tags:
+        - application_crl
+        - etcd
+
+    - name: "Log etcd CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] etcd CRL configured: {{ etcd_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - etcd
+
+    - name: "Display etcd CRL configuration"
+      ansible.builtin.debug:
+        msg: "✅ etcd CRL configured with soft-fail strategy"
+      tags:
+        - application_crl
+        - etcd
+        - debug
+
+  tags:
+    - application_crl
+    - etcd

@@ -1,0 +1,46 @@
+# roles/apache_crl/templates/vhost-https.conf.j2
+# HTTPS Virtual Host for CRL - SERVES ONLY, NO CLIENT CERT VALIDATION
+
+<VirtualHost *:{{ apache_listen_ssl_port }}>
+    ServerName {{ apache_vhost_name }}
+    ServerAdmin {{ apache_server_admin }}
+    DocumentRoot {{ apache_document_root }}
+    
+    # SSL/TLS Configuration
+    SSLEngine on
+    SSLProtocol -all +TLSv1.2 +TLSv1.3
+    SSLCipherSuite HIGH:!aNULL:!MD5:!eNULL
+    SSLCertificateFile {{ apache_ssl_cert_file }}
+    SSLCertificateKeyFile {{ apache_ssl_key_file }}
+    
+    # IMPORTANT: NO CLIENT CERTIFICATE VALIDATION ON CRL SERVER
+    # Clients validate CRL themselves
+    # This server just serves the file
+    
+    <Directory {{ apache_document_root }}>
+        Require all granted
+        Options Indexes FollowSymLinks
+    </Directory>
+    
+    <Directory {{ apache_crl_directory }}>
+        Require all granted
+        Options Indexes
+    </Directory>
+    
+    <Files "*.crl">
+        Header set Content-Type "application/pkix-crl"
+        Header set Content-Disposition "inline"
+        Header set Cache-Control "public, max-age=3600"
+    </Files>
+    
+    # Security Headers
+    <IfModule mod_headers.c>
+        Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains"
+        Header always set X-Content-Type-Options "nosniff"
+        Header always set X-Frame-Options "DENY"
+    </IfModule>
+    
+    ErrorLog {{ apache_log_dir }}/{{ apache_vhost_name }}-ssl-error.log
+    CustomLog {{ apache_log_dir }}/{{ apache_vhost_name }}-ssl-access.log combined
+    LogLevel {{ apache_log_level }}
+</VirtualHost>

@@ -1,0 +1,23 @@
+# playbooks/validate-crl-system.yml
+# Full system validation
+
+---
+
+- name: "Validate CRL System"
+  hosts: all
+  gather_facts: true
+  
+  tasks:
+    - name: "Run validation checks"
+      ansible.builtin.include_role:
+        name: validation
+      tags:
+        - validation
+        - verify
+
+    - name: "Final Status"
+      ansible.builtin.debug:
+        msg: "✅ CRL system validation complete"
+      tags:
+        - validation
+        - debug

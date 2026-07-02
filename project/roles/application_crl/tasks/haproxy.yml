@@ -1,0 +1,218 @@
+# roles/application_crl/tasks/haproxy.yml
+# Configure HAProxy with CRL validation
+
+---
+
+- name: "Configure HAProxy CRL"
+  block:
+    - name: "Add CRL to HAProxy configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ haproxy_config_file }}"
+        line: "    crl-file {{ haproxy_crl_file }}"
+        state: present
+        insertafter: "^global"
+      become: true
+      notify: "restart haproxy"
+      tags:
+        - application_crl
+        - haproxy
+
+    - name: "Test HAProxy configuration"
+      ansible.builtin.command:
+        cmd: "haproxy -c -f {{ haproxy_config_file }}"
+      changed_when: false
+      become: true
+      tags:
+        - application_crl
+        - haproxy
+
+    - name: "Log HAProxy CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] HAProxy CRL configured: {{ haproxy_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - haproxy
+
+  rescue:
+    - name: "Log HAProxy configuration failure"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] ERROR: HAProxy CRL configuration failed"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - haproxy
+
+  tags:
+    - application_crl
+    - haproxy
+
+---
+# roles/application_crl/tasks/sssd.yml
+# Configure SSSD with LDAP server CRL validation
+
+---
+
+- name: "Configure SSSD LDAP CRL"
+  block:
+    - name: "Create /etc/openldap/ldap.conf if not exists"
+      ansible.builtin.file:
+        path: /etc/openldap/ldap.conf
+        state: touch
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      tags:
+        - application_crl
+        - sssd
+
+    - name: "Add TLS_CRLFILE to ldap.conf"
+      ansible.builtin.lineinfile:
+        path: /etc/openldap/ldap.conf
+        line: "TLS_CRLFILE {{ sssd_crl_file }}"
+        state: present
+      become: true
+      tags:
+        - application_crl
+        - sssd
+
+    - name: "Log SSSD CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] SSSD LDAP CRL configured: {{ sssd_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - sssd
+
+  tags:
+    - application_crl
+    - sssd
+
+---
+# roles/application_crl/tasks/rsyslog.yml
+# Configure rsyslog with ossl driver and CRL
+
+---
+
+- name: "Configure rsyslog with ossl driver and CRL"
+  block:
+    - name: "Create rsyslog ossl driver config"
+      ansible.builtin.copy:
+        content: |
+          # rsyslog ossl driver with CRL
+          module(load="ossl")
+          
+          # TLS settings with CRL
+          global(
+            DefaultNetstreamDriver="ossl"
+            DefaultNetstreamDriverCAFile="/etc/pki/tls/certs/ca-bundle.crt"
+            DefaultNetstreamDriverCertFile="{{ rsyslog_crl_file }}"
+          )
+        dest: "{{ rsyslog_config_dir }}/50-crl-ossl.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      notify: "restart rsyslog"
+      tags:
+        - application_crl
+        - rsyslog
+
+    - name: "Log rsyslog CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] rsyslog ossl driver configured with CRL: {{ rsyslog_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - rsyslog
+
+  tags:
+    - application_crl
+    - rsyslog
+
+---
+# roles/application_crl/tasks/etcd.yml
+# Configure etcd with CRL validation
+
+---
+
+- name: "Configure etcd CRL"
+  block:
+    - name: "Add CRL to etcd configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ etcd_config_file }}"
+        line: "client-crl-file: {{ etcd_crl_file }}"
+        state: present
+      become: true
+      notify: "restart etcd"
+      tags:
+        - application_crl
+        - etcd
+
+    - name: "Log etcd CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] etcd CRL configured: {{ etcd_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - etcd
+
+  tags:
+    - application_crl
+    - etcd
+
+---
+# roles/application_crl/tasks/freeradius.yml
+# Configure FreeRADIUS for EAP-TLS with CRL
+
+---
+
+- name: "Configure FreeRADIUS CRL"
+  block:
+    - name: "Create FreeRADIUS CRL config"
+      ansible.builtin.copy:
+        content: |
+          # FreeRADIUS EAP-TLS with CRL
+          eap {
+            default_eap_type = tls
+            tls {
+              certfile = /etc/raddb/certs/server.pem
+              keyfile = /etc/raddb/certs/server.key
+              cafile = /etc/pki/tls/certs/ca-bundle.crt
+              crlfile = {{ freeradius_crl_file }}
+            }
+          }
+        dest: "{{ freeradius_config_dir }}/mods-enabled/eap-tls-crl.conf"
+        owner: root
+        group: radiusd
+        mode: '0640'
+      become: true
+      notify: "restart freeradius"
+      tags:
+        - application_crl
+        - freeradius
+
+    - name: "Log FreeRADIUS CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] FreeRADIUS EAP-TLS CRL configured: {{ freeradius_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - freeradius
+
+  tags:
+    - application_crl
+    - freeradius

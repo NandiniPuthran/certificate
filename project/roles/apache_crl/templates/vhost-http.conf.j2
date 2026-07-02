@@ -1,0 +1,34 @@
+# roles/apache_crl/templates/vhost-http.conf.j2
+# HTTP Virtual Host for CRL (Redirect to HTTPS)
+
+<VirtualHost *:{{ apache_listen_port }}>
+    ServerName {{ apache_vhost_name }}
+    ServerAdmin {{ apache_server_admin }}
+    DocumentRoot {{ apache_document_root }}
+    
+    <Directory {{ apache_document_root }}>
+        Require all granted
+        Options Indexes FollowSymLinks
+    </Directory>
+    
+    <Directory {{ apache_crl_directory }}>
+        Require all granted
+        Options Indexes
+    </Directory>
+    
+    <Files "*.crl">
+        Header set Content-Type "application/pkix-crl"
+        Header set Content-Disposition "inline"
+    </Files>
+    
+    ErrorLog {{ apache_log_dir }}/{{ apache_vhost_name }}-error.log
+    CustomLog {{ apache_log_dir }}/{{ apache_vhost_name }}-access.log combined
+    LogLevel {{ apache_log_level }}
+    
+{% if apache_ssl_enabled %}
+    # Redirect to HTTPS
+    RewriteEngine On
+    RewriteCond %{HTTPS} off
+    RewriteRule ^/(crl/.*)$ https://{{ apache_vhost_name }}:{{ apache_listen_ssl_port }}/$1 [R=301,L]
+{% endif %}
+</VirtualHost>

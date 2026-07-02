@@ -1,0 +1,141 @@
+# roles/freeipa_crl/tasks/freeipa_connect.yml
+# Verify FreeIPA server connectivity and client configuration
+
+---
+
+- name: "Test network connectivity to FreeIPA server"
+  block:
+    - name: "Ping FreeIPA server"
+      ansible.builtin.command:
+        cmd: "ping -c 1 {{ freeipa_server }}"
+        timeout: 10
+      changed_when: false
+      register: freeipa_ping
+      tags:
+        - freeipa_crl
+        - connectivity
+
+    - name: "Assert FreeIPA server is reachable"
+      ansible.builtin.assert:
+        that:
+          - freeipa_ping.rc == 0
+        fail_msg: "FreeIPA server {{ freeipa_server }} is not reachable"
+      tags:
+        - freeipa_crl
+        - connectivity
+
+  rescue:
+    - name: "Log connectivity failure"
+      ansible.builtin.lineinfile:
+        path: "{{ freeipa_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] CRITICAL: Cannot reach FreeIPA {{ freeipa_server }}"
+        create: true
+      become: true
+      tags:
+        - freeipa_crl
+        - connectivity
+
+    - name: "Fail with helpful message"
+      ansible.builtin.fail:
+        msg: |
+          Cannot reach FreeIPA server: {{ freeipa_server }}
+          Verify:
+          1. Network connectivity
+          2. DNS resolution
+          3. Firewall rules
+      tags:
+        - freeipa_crl
+        - connectivity
+
+  tags:
+    - freeipa_crl
+    - connectivity
+
+- name: "Verify FreeIPA client tools"
+  block:
+    - name: "Check if 'ipa' command exists"
+      ansible.builtin.command:
+        cmd: "which ipa"
+      changed_when: false
+      register: ipa_which
+      tags:
+        - freeipa_crl
+        - tools
+
+    - name: "Get IPA version"
+      ansible.builtin.command:
+        cmd: "ipa --version"
+      changed_when: false
+      register: ipa_version
+      tags:
+        - freeipa_crl
+        - tools
+
+    - name: "Display IPA version"
+      ansible.builtin.debug:
+        msg: "FreeIPA client: {{ ipa_version.stdout }}"
+      tags:
+        - freeipa_crl
+        - tools
+
+  rescue:
+    - name: "FreeIPA client not installed"
+      ansible.builtin.fail:
+        msg: |
+          FreeIPA client tools not found.
+          Install: yum install -y ipa-client
+      tags:
+        - freeipa_crl
+        - tools
+
+  tags:
+    - freeipa_crl
+    - tools
+
+- name: "Test FreeIPA API connectivity"
+  block:
+    - name: "Call FreeIPA API"
+      ansible.builtin.command:
+        cmd: "ipa ca-list --all"
+        timeout: "{{ freeipa_timeout }}"
+      changed_when: false
+      register: freeipa_api_test
+      tags:
+        - freeipa_crl
+        - api
+
+    - name: "Assert API is accessible"
+      ansible.builtin.assert:
+        that:
+          - freeipa_api_test.rc == 0
+        fail_msg: "FreeIPA API not accessible"
+      tags:
+        - freeipa_crl
+        - api
+
+  rescue:
+    - name: "Log API failure"
+      ansible.builtin.lineinfile:
+        path: "{{ freeipa_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] CRITICAL: FreeIPA API not accessible"
+        create: true
+      become: true
+      tags:
+        - freeipa_crl
+        - api
+
+    - name: "Fail with helpful message"
+      ansible.builtin.fail:
+        msg: |
+          FreeIPA API not accessible.
+          Verify:
+          1. Kerberos authentication working
+          2. FreeIPA client configured
+          3. Firewall allows API access
+      tags:
+        - freeipa_crl
+        - api
+
+  tags:
+    - freeipa_crl
+    - api

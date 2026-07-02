@@ -1,0 +1,40 @@
+# roles/application_crl/tasks/freeradius.yml
+# Configure FreeRADIUS for EAP-TLS with CRL
+
+---
+
+- name: "Configure FreeRADIUS EAP-TLS CRL"
+  block:
+    - name: "Add CRL to radiusd.conf"
+      ansible.builtin.lineinfile:
+        path: "{{ freeradius_config_dir }}/radiusd.conf"
+        line: "  crl_file = {{ freeradius_crl_file }}"
+        state: present
+        insertafter: "^  certificates {"
+      become: true
+      notify: "restart freeradius"
+      tags:
+        - application_crl
+        - freeradius
+
+    - name: "Log FreeRADIUS CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] FreeRADIUS EAP-TLS CRL: {{ freeradius_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - freeradius
+
+    - name: "Display FreeRADIUS CRL configuration"
+      ansible.builtin.debug:
+        msg: "✅ FreeRADIUS EAP-TLS configured with CRL soft-fail strategy"
+      tags:
+        - application_crl
+        - freeradius
+        - debug
+
+  tags:
+    - application_crl
+    - freeradius

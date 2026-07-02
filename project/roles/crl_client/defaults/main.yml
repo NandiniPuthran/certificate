@@ -1,0 +1,55 @@
+# roles/crl_client/defaults/main.yml
+# CRL distribution client - EVERY 2 HOURS to beat 4-hour window
+
+---
+
+# CRL server URL
+crl_server_url: "http://crl.example.com/crl/ca.crl"
+crl_download_method: curl  # curl, wget, get_url
+crl_download_timeout: 30
+
+# CRL storage
+crl_download_dir: /etc/crl
+crl_filename: ca.crl
+crl_filepath: "{{ crl_download_dir }}/{{ crl_filename }}"
+
+# CRITICAL: Update every 2 hours to stay within 4-hour CRL validity window
+crl_update_schedule: "0 */2 * * *"
+crl_update_method: systemd-timer  # RECOMMENDED for reliability (or cron as fallback)
+
+# Retry configuration
+crl_download_retry_attempts: 3
+crl_download_retry_delay: 5
+
+# CRL validation
+crl_validate_after_download: true
+crl_validate_signature: false  # Optional - only if CA cert available
+crl_validate_expiration: true  # CRITICAL for soft-fail strategy
+
+# Soft-fail strategy (application will alert but continue)
+crl_allow_stale: true  # Accept expired CRL, let app decide
+crl_allow_missing: true  # Continue if CRL missing
+crl_alert_on_stale: true  # But alert admin
+crl_alert_on_missing: true
+
+# Expiry thresholds
+crl_warn_before_expiry_hours: 1.5  # Warn if expires in < 1.5 hours
+crl_critical_before_expiry_hours: 1  # Critical alert if < 1 hour
+
+# Backup configuration
+crl_backup_previous: true
+crl_backup_dir: /var/backups/crl-management/client
+crl_backup_retention_days: 30
+
+# Permissions
+crl_owner: root
+crl_group: root
+crl_permissions: '0644'
+
+# Logging
+crl_log_dir: /var/log/crl-management
+crl_log_file: "{{ crl_log_dir }}/crl-client.log"
+
+# Proxy (if needed)
+crl_use_proxy: false
+crl_proxy_url: ""

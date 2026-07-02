@@ -1,0 +1,323 @@
+# roles/crl_client/tasks/main.yml
+# CRL distribution client - Download and validate
+
+---
+
+- name: "Create CRL directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ crl_owner }}"
+    group: "{{ crl_group }}"
+    mode: '0755'
+  become: true
+  loop:
+    - "{{ crl_download_dir }}"
+    - "{{ crl_backup_dir }}"
+    - "{{ crl_log_dir }}"
+  tags:
+    - crl_client
+    - setup
+
+- name: "Download CRL from server"
+  block:
+    - name: "Download CRL with retries"
+      ansible.builtin.get_url:
+        url: "{{ crl_server_url }}"
+        dest: "{{ crl_filepath }}.tmp"
+        timeout: "{{ crl_download_timeout }}"
+        owner: "{{ crl_owner }}"
+        group: "{{ crl_group }}"
+        mode: "{{ crl_permissions }}"
+        force: true
+      become: true
+      register: crl_download
+      retries: "{{ crl_download_retry_attempts }}"
+      delay: "{{ crl_download_retry_delay }}"
+      until: crl_download is succeeded
+      tags:
+        - crl_client
+        - download
+
+    - name: "Verify downloaded file"
+      ansible.builtin.stat:
+        path: "{{ crl_filepath }}.tmp"
+      register: crl_temp_stat
+      tags:
+        - crl_client
+        - download
+
+    - name: "Validate CRL format"
+      block:
+        - name: "Check CRL format"
+          ansible.builtin.command:
+            cmd: "openssl crl -in {{ crl_filepath }}.tmp -noout -text"
+            timeout: 30
+          changed_when: false
+          register: crl_format_check
+          tags:
+            - crl_client
+            - validate
+
+        - name: "Extract CRL metadata"
+          ansible.builtin.shell:
+            cmd: |
+              openssl crl -in {{ crl_filepath }}.tmp -noout -text | grep -E "Last Update|Next Update"
+            timeout: 30
+          changed_when: false
+          register: crl_dates
+          tags:
+            - crl_client
+            - validate
+
+        - name: "Check CRL expiry"
+          ansible.builtin.shell:
+            cmd: |
+              nextupdate=$(openssl crl -in {{ crl_filepath }}.tmp -noout -text | grep "Next Update" | sed 's/.*Next Update: //')
+              now_sec=$(date +%s)
+              expiry_sec=$(date -d "$nextupdate" +%s 2>/dev/null || echo $now_sec)
+              hours=$((($expiry_sec - $now_sec) / 3600))
+              echo $hours
+            timeout: 30
+          changed_when: false
+          register: hours_until_expiry
+          tags:
+            - crl_client
+            - validate
+
+        - name: "Alert if CRL expires soon"
+          block:
+            - name: "CRITICAL: CRL expires in < 1 hour"
+              ansible.builtin.lineinfile:
+                path: "{{ crl_log_file }}"
+                line: "[{{ ansible_date_time.iso8601 }}] 🔴 CRITICAL: Downloaded CRL expires in {{ hours_until_expiry.stdout }} hours!"
+                create: true
+              become: true
+              when: hours_until_expiry.stdout | int <= 1
+              tags:
+                - crl_client
+                - validate
+
+            - name: "WARNING: CRL expires in 1-1.5 hours"
+              ansible.builtin.lineinfile:
+                path: "{{ crl_log_file }}"
+                line: "[{{ ansible_date_time.iso8601 }}] ⚠️  WARNING: Downloaded CRL expires in {{ hours_until_expiry.stdout }} hours"
+                create: true
+              become: true
+              when: 
+                - hours_until_expiry.stdout | int > 1
+                - hours_until_expiry.stdout | int < crl_warn_before_expiry_hours | int
+              tags:
+                - crl_client
+                - validate
+
+            - name: "OK: CRL has good validity"
+              ansible.builtin.debug:
+                msg: "✅ CRL valid for {{ hours_until_expiry.stdout }} hours"
+              when: hours_until_expiry.stdout | int >= crl_warn_before_expiry_hours | int
+              tags:
+                - crl_client
+                - validate
+
+          tags:
+            - crl_client
+            - validate
+
+      rescue:
+        - name: "Handle validation failure (soft-fail)"
+          block:
+            - name: "Log validation error"
+              ansible.builtin.lineinfile:
+                path: "{{ crl_log_file }}"
+                line: "[{{ ansible_date_time.iso8601 }}] ERROR: CRL validation failed, will use previous CRL if available"
+                create: true
+              become: true
+              tags:
+                - crl_client
+                - validate
+
+            - name: "Remove invalid CRL"
+              ansible.builtin.file:
+                path: "{{ crl_filepath }}.tmp"
+                state: absent
+              become: true
+              tags:
+                - crl_client
+                - validate
+
+          tags:
+            - crl_client
+            - validate
+
+      tags:
+        - crl_client
+        - validate
+
+    - name: "Backup existing CRL"
+      block:
+        - name: "Check if current CRL exists"
+          ansible.builtin.stat:
+            path: "{{ crl_filepath }}"
+          register: current_crl_stat
+          tags:
+            - crl_client
+            - backup
+
+        - name: "Backup current CRL"
+          ansible.builtin.copy:
+            src: "{{ crl_filepath }}"
+            dest: "{{ crl_backup_dir }}/ca-{{ ansible_date_time.iso8601_basic }}.crl"
+            remote_src: true
+            owner: "{{ crl_owner }}"
+            group: "{{ crl_group }}"
+            mode: '{{ crl_permissions }}'
+          become: true
+          when: 
+            - current_crl_stat.stat.exists
+            - crl_backup_previous | bool
+          tags:
+            - crl_client
+            - backup
+
+        - name: "Clean old backups"
+          ansible.builtin.find:
+            paths: "{{ crl_backup_dir }}"
+            age: "{{ crl_backup_retention_days }}d"
+            file_type: file
+          register: old_backups
+          tags:
+            - crl_client
+            - backup
+
+        - name: "Remove expired backups"
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: absent
+          become: true
+          loop: "{{ old_backups.files }}"
+          tags:
+            - crl_client
+            - backup
+
+      tags:
+        - crl_client
+        - backup
+
+    - name: "Install new CRL"
+      block:
+        - name: "Check if temp CRL is valid"
+          ansible.builtin.stat:
+            path: "{{ crl_filepath }}.tmp"
+          register: temp_crl_stat
+          tags:
+            - crl_client
+            - install
+
+        - name: "Replace CRL"
+          ansible.builtin.command:
+            cmd: "mv {{ crl_filepath }}.tmp {{ crl_filepath }}"
+          become: true
+          when: temp_crl_stat.stat.exists
+          notify: "crl updated"
+          tags:
+            - crl_client
+            - install
+
+        - name: "Log successful update"
+          ansible.builtin.lineinfile:
+            path: "{{ crl_log_file }}"
+            line: "[{{ ansible_date_time.iso8601 }}] ✅ CRL updated successfully"
+            create: true
+          become: true
+          tags:
+            - crl_client
+            - install
+
+      rescue:
+        - name: "Keep old CRL (soft-fail)"
+          ansible.builtin.debug:
+            msg: "No new CRL installed, keeping existing CRL"
+          tags:
+            - crl_client
+            - install
+
+      tags:
+        - crl_client
+        - install
+
+  rescue:
+    - name: "Handle download failure"
+      block:
+        - name: "Log download failure"
+          ansible.builtin.lineinfile:
+            path: "{{ crl_log_file }}"
+            line: "[{{ ansible_date_time.iso8601 }}] ERROR: CRL download failed from {{ crl_server_url }}"
+            create: true
+          become: true
+          tags:
+            - crl_client
+            - download
+
+        - name: "Cleanup temp file"
+          ansible.builtin.file:
+            path: "{{ crl_filepath }}.tmp"
+            state: absent
+          become: true
+          tags:
+            - crl_client
+            - download
+
+      tags:
+        - crl_client
+        - download
+
+  tags:
+    - crl_client
+    - download
+
+- name: "Setup automated CRL updates (every 2 hours)"
+  block:
+    - name: "Create update script"
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          ansible-playbook /opt/crl-ansible/playbooks/update-crl-client.yml \
+            -i /etc/ansible/hosts \
+            -l {{ inventory_hostname }} \
+            --tags crl_client,download > /dev/null 2>&1
+        dest: /usr/local/bin/update-crl.sh
+        mode: '0755'
+      become: true
+      tags:
+        - crl_client
+        - schedule
+
+    - name: "Setup cron job"
+      ansible.builtin.cron:
+        name: "CRL Update (Every 2 hours)"
+        job: "/usr/local/bin/update-crl.sh"
+        minute: "0"
+        hour: "*/2"
+        user: root
+      become: true
+      when: crl_update_method == "cron"
+      tags:
+        - crl_client
+        - schedule
+
+  tags:
+    - crl_client
+    - schedule
+
+- name: "Display CRL client status"
+  ansible.builtin.debug:
+    msg: |
+      ✅ CRL Client Configured
+      - Download from: {{ crl_server_url }}
+      - Stored at: {{ crl_filepath }}
+      - Schedule: Every 2 hours ({{ crl_update_schedule }})
+      - Soft-fail: Enabled (app decides on stale CRL)
+      - Logs: {{ crl_log_file }}
+  tags:
+    - crl_client
+    - debug

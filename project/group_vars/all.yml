@@ -1,0 +1,31 @@
+# Global variables for all hosts
+
+---
+
+# FreeIPA Configuration
+common_freeipa_server: ipa.example.com
+common_freeipa_realm: EXAMPLE.COM
+common_freeipa_timeout: 30
+
+# Logging
+common_log_dir: /var/log/crl-management
+common_log_level: INFO
+
+# CRL Update Schedule - CRITICAL: Every 2 hours to beat 4-hour expiry
+freeipa_export_schedule: "0 */2 * * *"
+crl_update_schedule: "0 */2 * * *"
+
+# CRL Server
+apache_vhost_name: crl.example.com
+apache_server_admin: admin@example.com
+crl_server_url: "http://crl.example.com/crl/ca.crl"
+
+# SSL Certificates for CRL server
+apache_ssl_enabled: true
+apache_ssl_cert_file: /etc/pki/tls/certs/crl-server.crt
+apache_ssl_key_file: /etc/pki/tls/private/crl-server.key
+
+# Soft-Fail Strategy for Applications
+application_crl_soft_fail: true
+application_crl_allow_stale: true
+application_crl_alert_on_failure: true

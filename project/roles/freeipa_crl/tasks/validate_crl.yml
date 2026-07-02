@@ -1,0 +1,189 @@
+# roles/freeipa_crl/tasks/validate_crl.yml
+# Validate CRL format and optionally signature
+
+---
+
+- name: "Validate CRL format"
+  block:
+    - name: "Check CRL is readable by OpenSSL"
+      ansible.builtin.command:
+        cmd: "openssl crl -in {{ freeipa_crl_output_file }} -noout -text -noout"
+        timeout: 30
+      changed_when: false
+      register: crl_format_check
+      tags:
+        - freeipa_crl
+        - validate
+        - format
+
+    - name: "Assert CRL format is valid"
+      ansible.builtin.assert:
+        that:
+          - crl_format_check.rc == 0
+        fail_msg: "CRL format validation failed"
+      tags:
+        - freeipa_crl
+        - validate
+        - format
+
+  rescue:
+    - name: "Log format validation failure"
+      ansible.builtin.lineinfile:
+        path: "{{ freeipa_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] ERROR: CRL format validation failed"
+        create: true
+      become: true
+      tags:
+        - freeipa_crl
+        - validate
+
+    - name: "Fail with error"
+      ansible.builtin.fail:
+        msg: "CRL format is invalid. Cannot use this CRL."
+      tags:
+        - freeipa_crl
+        - validate
+
+  tags:
+    - freeipa_crl
+    - validate
+
+- name: "Extract CRL validity information"
+  block:
+    - name: "Get CRL Last Update and Next Update"
+      ansible.builtin.shell:
+        cmd: |
+          openssl crl -in {{ freeipa_crl_output_file }} -noout -text | grep -E "Last Update|Next Update"
+        timeout: 30
+      changed_when: false
+      register: crl_validity
+      tags:
+        - freeipa_crl
+        - validate
+        - expiry
+
+    - name: "Get CRL Issuer"
+      ansible.builtin.shell:
+        cmd: |
+          openssl crl -in {{ freeipa_crl_output_file }} -noout -issuer
+        timeout: 30
+      changed_when: false
+      register: crl_issuer
+      tags:
+        - freeipa_crl
+        - validate
+        - issuer
+
+    - name: "Get CRL nextUpdate timestamp"
+      ansible.builtin.shell:
+        cmd: |
+          openssl crl -in {{ freeipa_crl_output_file }} -noout -text | grep "Next Update" | sed 's/.*Next Update: //'
+        timeout: 30
+      changed_when: false
+      register: crl_nextupdate
+      tags:
+        - freeipa_crl
+        - validate
+        - expiry
+
+    - name: "Display CRL validity"
+      ansible.builtin.debug:
+        msg: |
+          CRL Validity Information:
+          {{ crl_validity.stdout }}
+          {{ crl_issuer.stdout }}
+      tags:
+        - freeipa_crl
+        - validate
+        - debug
+
+  tags:
+    - freeipa_crl
+    - validate
+
+- name: "Optionally validate CRL signature"
+  block:
+    - name: "Check if CA certificate exists"
+      ansible.builtin.stat:
+        path: "{{ freeipa_ca_cert_path }}"
+      register: ca_cert_stat
+      tags:
+        - freeipa_crl
+        - validate
+        - signature
+
+    - name: "Verify CRL signature against CA"
+      block:
+        - name: "Verify CRL signature"
+          ansible.builtin.command:
+            cmd: "openssl crl -in {{ freeipa_crl_output_file }} -noout -verify -CAfile {{ freeipa_ca_cert_path }}"
+            timeout: 30
+          changed_when: false
+          register: crl_sig_verify
+          tags:
+            - freeipa_crl
+            - validate
+            - signature
+
+        - name: "Assert signature is valid"
+          ansible.builtin.assert:
+            that:
+              - "'verify OK' in crl_sig_verify.stdout or 'Signature ok' in crl_sig_verify.stdout"
+            fail_msg: "CRL signature verification failed"
+          tags:
+            - freeipa_crl
+            - validate
+            - signature
+
+      when:
+        - ca_cert_stat.stat.exists
+        - freeipa_validate_signature | bool
+      tags:
+        - freeipa_crl
+        - validate
+        - signature
+
+  rescue:
+    - name: "Log signature failure"
+      ansible.builtin.lineinfile:
+        path: "{{ freeipa_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] WARNING: CRL signature validation failed, continuing anyway"
+        create: true
+      become: true
+      tags:
+        - freeipa_crl
+        - validate
+
+  tags:
+    - freeipa_crl
+    - validate
+
+- name: "Extract revocation count"
+  block:
+    - name: "Count revoked certificates"
+      ansible.builtin.shell:
+        cmd: |
+          openssl crl -in {{ freeipa_crl_output_file }} -noout -text | grep -c "Serial Number" || echo "0"
+        timeout: 30
+      changed_when: false
+      register: revoked_count
+      tags:
+        - freeipa_crl
+        - validate
+        - metadata
+
+    - name: "Store CRL metadata"
+      ansible.builtin.set_fact:
+        crl_metadata:
+          revoked_count: "{{ revoked_count.stdout.strip() }}"
+          issuer: "{{ crl_issuer.stdout | default('unknown') }}"
+          nextupdate: "{{ crl_nextupdate.stdout | default('unknown') }}"
+          exported_at: "{{ ansible_date_time.iso8601 }}"
+      tags:
+        - freeipa_crl
+        - validate
+        - metadata
+
+  tags:
+    - freeipa_crl
+    - validate

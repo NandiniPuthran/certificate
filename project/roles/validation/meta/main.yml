@@ -1,0 +1,17 @@
+# roles/validation/meta/main.yml
+
+---
+
+galaxy_info:
+  author: "Enterprise PKI Team"
+  description: "Post-deployment CRL system validation"
+  license: "MIT"
+  min_ansible_version: "2.9"
+  galaxy_tags:
+    - crl
+    - validation
+
+dependencies: []
+
+tags:
+  - validation

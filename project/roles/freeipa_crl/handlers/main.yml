@@ -1,0 +1,31 @@
+# roles/freeipa_crl/handlers/main.yml
+# Handlers for FreeIPA CRL export role
+
+---
+
+- name: "Restart FreeIPA service"
+  ansible.builtin.systemd:
+    name: ipa
+    state: restarted
+  become: true
+  listen: "restart ipa"
+  tags:
+    - freeipa_crl
+    - handlers
+
+- name: "Reload systemd daemon"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  listen: "reload systemd"
+  tags:
+    - freeipa_crl
+    - handlers
+
+- name: "Trigger CRL publication"
+  ansible.builtin.debug:
+    msg: "CRL export complete - Apache will publish new CRL on next run"
+  listen: "trigger crl publish"
+  tags:
+    - freeipa_crl
+    - handlers

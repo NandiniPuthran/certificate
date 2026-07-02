@@ -1,0 +1,70 @@
+# roles/application_crl/defaults/main.yml
+# Application CRL configuration - SOFT-FAIL STRATEGY
+
+---
+
+# Which application to configure (apache, haproxy, sssd, rsyslog, etcd, freeradius)
+application_crl_type: apache  # Override per host
+
+# CRL file location (from crl_client role)
+application_crl_file_path: /etc/crl/ca.crl
+
+# SOFT-FAIL STRATEGY: Applications check CRL but don't fail if it's expired/missing
+application_crl_soft_fail: true  # Don't service-break on stale CRL
+application_crl_alert_on_failure: true  # But alert admin
+
+# Expiry thresholds for alerts
+application_crl_warn_expiry_hours: 1.5
+application_crl_critical_expiry_hours: 1
+
+# CA certificate path (for optional signature validation on client)
+application_crl_ca_cert_path: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+# Logging
+application_crl_log_dir: /var/log/crl-management
+application_crl_log_file: "{{ application_crl_log_dir }}/application-crl.log"
+
+# Notification on configuration change
+application_crl_notify_on_change: true
+
+#=== APPLICATION-SPECIFIC SETTINGS ===
+
+# Apache mod_ssl (HTTP/HTTPS client cert validation)
+apache_crl_enabled: true
+apache_ssl_crlfile: "{{ application_crl_file_path }}"
+apache_ssl_crlcheck_mode: "leaf"  # SOFT-FAIL: check leaf only, don't fail on expired
+apache_service_name: httpd
+apache_config_dir: /etc/httpd/conf/httpd.conf
+
+# HAProxy (client cert validation)
+haproxy_crl_enabled: true
+haproxy_crl_file: "{{ application_crl_file_path }}"
+haproxy_config_file: /etc/haproxy/haproxy.cfg
+haproxy_service_name: haproxy
+
+# SSSD with LDAP server cert validation
+sssd_crl_enabled: true
+sssd_crl_file: "{{ application_crl_file_path }}"
+sssd_ldap_tls_crlfile: "{{ application_crl_file_path }}"
+sssd_config_file: /etc/sssd/sssd.conf
+sssd_service_name: sssd
+
+# rsyslog with ossl driver (TLS syslog)
+rsyslog_crl_enabled: true
+rsyslog_crl_file: "{{ application_crl_file_path }}"
+rsyslog_config_dir: /etc/rsyslog.d
+rsyslog_service_name: rsyslog
+rsyslog_driver: ossl  # Must be ossl, not gtls (gtls doesn't support CRL)
+
+# etcd (client cert validation)
+etcd_crl_enabled: true
+etcd_crl_file: "{{ application_crl_file_path }}"
+etcd_config_file: /etc/etcd/etcd.conf.yml
+etcd_service_name: etcd
+
+# FreeRADIUS (EAP-TLS authentication)
+freeradius_crl_enabled: true
+freeradius_crl_file: "{{ application_crl_file_path }}"
+freeradius_config_dir: /etc/raddb
+freeradius_eap_tls_config: /etc/raddb/mods-available/eap
+freeradius_service_name: radiusd

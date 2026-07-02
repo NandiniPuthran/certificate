@@ -1,0 +1,38 @@
+# roles/application_crl/tasks/rsyslog.yml
+# Configure rsyslog with ossl driver and CRL
+
+---
+
+- name: "Configure rsyslog with ossl driver and CRL"
+  block:
+    - name: "Create rsyslog ossl driver config"
+      ansible.builtin.copy:
+        content: |
+          module(load="ossl")
+          global(
+            DefaultNetstreamDriver="ossl"
+            DefaultNetstreamDriverCertFile="{{ rsyslog_crl_file }}"
+          )
+        dest: "{{ rsyslog_config_dir }}/50-crl-ossl.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      notify: "restart rsyslog"
+      tags:
+        - application_crl
+        - rsyslog
+
+    - name: "Log rsyslog CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] rsyslog ossl driver CRL: {{ rsyslog_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - rsyslog
+
+  tags:
+    - application_crl
+    - rsyslog

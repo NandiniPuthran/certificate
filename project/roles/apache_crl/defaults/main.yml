@@ -1,0 +1,67 @@
+# roles/apache_crl/defaults/main.yml
+# Apache CRL server configuration - SERVES ONLY, NO VALIDATION
+
+---
+
+# Apache installation
+apache_package_name: httpd
+apache_service_name: httpd
+apache_state: started
+apache_enabled: true
+
+# Apache paths
+apache_config_dir: /etc/httpd
+apache_config_enabled_dir: /etc/httpd/conf.d
+apache_mods_enabled_dir: /etc/httpd/conf.modules.d
+
+# Virtual host configuration
+apache_vhost_name: crl.example.com
+apache_server_admin: admin@example.com
+apache_listen_port: 80
+apache_listen_ssl_port: 443
+apache_ssl_enabled: true
+
+# CRL directory and files
+apache_document_root: /var/www/crl
+apache_crl_directory: "{{ apache_document_root }}/crl"
+apache_crl_filename: ca.crl
+apache_crl_filepath: "{{ apache_crl_directory }}/{{ apache_crl_filename }}"
+
+# Landing page
+apache_landing_page_enabled: true
+
+# SSL certificates
+apache_ssl_cert_file: /etc/pki/tls/certs/crl-server.crt
+apache_ssl_key_file: /etc/pki/tls/private/crl-server.key
+
+# Modules to enable
+apache_modules_to_enable:
+  - ssl
+  - headers
+  - rewrite
+
+# Firewall
+apache_firewall_enabled: true
+apache_firewall_backend: firewalld
+apache_firewall_allow_http: true
+apache_firewall_allow_https: true
+
+# SELinux
+apache_selinux_enabled: false
+apache_selinux_port_context: "http_port_t"
+apache_selinux_file_context: "httpd_sys_content_t"
+
+# Apache user/group
+apache_user: apache
+apache_group: apache
+
+# Logging
+apache_log_dir: /var/log/httpd
+apache_log_level: warn
+
+# Performance
+apache_max_connections: 256
+apache_timeout: 300
+
+# CRL source (from freeipa_crl role)
+crl_source_path: /tmp/freeipa-crl-export/ca.crl

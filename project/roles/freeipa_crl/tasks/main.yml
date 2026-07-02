@@ -1,0 +1,68 @@
+# roles/freeipa_crl/tasks/main.yml
+# Main orchestration for FreeIPA CRL extraction
+
+---
+
+- name: "Create log directory"
+  ansible.builtin.file:
+    path: "{{ freeipa_log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags:
+    - freeipa_crl
+    - setup
+
+- name: "Verify FreeIPA connectivity"
+  ansible.builtin.include_tasks: freeipa_connect.yml
+  tags:
+    - freeipa_crl
+    - freeipa
+    - connectivity
+
+- name: "Export CRL from FreeIPA"
+  ansible.builtin.include_tasks: export_crl.yml
+  tags:
+    - freeipa_crl
+    - export
+    - crl
+
+- name: "Validate CRL format and expiration"
+  ansible.builtin.include_tasks: validate_crl.yml
+  tags:
+    - freeipa_crl
+    - validate
+    - verification
+
+- name: "Check CRL expiry against 4-hour window"
+  ansible.builtin.include_tasks: check_expiry.yml
+  tags:
+    - freeipa_crl
+    - expiry
+    - critical
+
+- name: "Backup CRL with retention policy"
+  ansible.builtin.include_tasks: backup_crl.yml
+  when: freeipa_backup_crl | bool
+  tags:
+    - freeipa_crl
+    - backup
+
+- name: "Setup automated export schedule"
+  ansible.builtin.include_tasks: schedule_export.yml
+  tags:
+    - freeipa_crl
+    - schedule
+    - automation
+
+- name: "Log successful export"
+  ansible.builtin.lineinfile:
+    path: "{{ freeipa_log_file }}"
+    line: "[{{ ansible_date_time.iso8601 }}] CRL export successful - NextUpdate: {{ crl_nextupdate.stdout | default('unknown') }}"
+    create: true
+  become: true
+  tags:
+    - freeipa_crl
+    - logging

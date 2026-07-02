@@ -1,0 +1,267 @@
+# roles/freeipa_crl/tasks/schedule_export.yml
+# Setup automated CRL export every 2 hours with SYSTEMD-TIMER (RECOMMENDED for reliability)
+
+---
+
+- name: "Create CRL export script"
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      # Automated FreeIPA CRL export script
+      # Runs every 2 hours to keep CRL fresh
+      # Logs to: journalctl -u freeipa-crl-export.service
+      
+      set -e  # Exit on error
+      
+      LOG_DIR="/var/log/crl-management"
+      LOG_FILE="$LOG_DIR/freeipa-crl.log"
+      CRL_EXPORT_DIR="/tmp/freeipa-crl-export"
+      CRL_OUTPUT_FILE="$CRL_EXPORT_DIR/ca.crl"
+      MAX_RETRIES=3
+      RETRY_DELAY=5
+      
+      mkdir -p "$CRL_EXPORT_DIR" "$LOG_DIR"
+      
+      export_crl() {
+          local attempt=1
+          while [ $attempt -le $MAX_RETRIES ]; do
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] Attempt $attempt/$MAX_RETRIES: Fetching CRL from FreeIPA" | tee -a "$LOG_FILE"
+              
+              if curl -f -s -o "$CRL_OUTPUT_FILE" http://{{ freeipa_server }}/ca/crl/cacert.crl 2>&1; then
+                  if openssl crl -in "$CRL_OUTPUT_FILE" -noout > /dev/null 2>&1; then
+                      echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ CRL export successful" | tee -a "$LOG_FILE"
+                      return 0
+                  fi
+              fi
+              
+              if [ $attempt -lt $MAX_RETRIES ]; then
+                  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Retry in ${RETRY_DELAY}s..." | tee -a "$LOG_FILE"
+                  sleep $RETRY_DELAY
+              fi
+              ((attempt++))
+          done
+          
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ CRL export failed after $MAX_RETRIES attempts" | tee -a "$LOG_FILE"
+          return 1
+      }
+      
+      export_crl
+    dest: /usr/local/bin/freeipa-crl-export.sh
+    mode: '0755'
+    owner: root
+    group: root
+  become: true
+  tags:
+    - freeipa_crl
+    - schedule
+
+# ============================================
+# SYSTEMD TIMER - RECOMMENDED FOR RELIABILITY
+# ============================================
+
+- name: "Setup CRL export with SYSTEMD TIMER (RECOMMENDED)"
+  block:
+    - name: "Create systemd service for CRL export"
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=FreeIPA CRL Export Service (Every 2 Hours)
+          Documentation=https://freeipa.org
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Service]
+          Type=oneshot
+          User=root
+          ExecStart=/usr/local/bin/freeipa-crl-export.sh
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=freeipa-crl-export
+          
+          # Reliability features
+          Restart=on-failure
+          RestartForceExitStatus=1
+          RestartSec=10s
+          TimeoutStartSec=300
+          
+          # Environment
+          Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+        dest: /etc/systemd/system/freeipa-crl-export.service
+      become: true
+      notify: "reload systemd"
+      tags:
+        - freeipa_crl
+        - schedule
+        - systemd
+
+    - name: "Create systemd timer for CRL export"
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=FreeIPA CRL Export Timer (Every 2 Hours)
+          Documentation=https://freeipa.org
+          Requires=freeipa-crl-export.service
+          
+          [Timer]
+          # Run every 2 hours at :00 minute
+          OnCalendar=*-*-* 00,02,04,06,08,10,12,14,16,18,20,22:00:00
+          
+          # Run 2 minutes after system boot (if missed)
+          OnBootSec=2min
+          
+          # Accuracy: 1 second (very precise)
+          AccuracySec=1s
+          
+          # Persistent: track state across reboots
+          Persistent=true
+          
+          # If missed, run immediately on next trigger
+          FixedRandomDelay=false
+          
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/freeipa-crl-export.timer
+      become: true
+      notify: "reload systemd"
+      tags:
+        - freeipa_crl
+        - schedule
+        - systemd
+
+    - name: "Enable and start CRL export timer"
+      ansible.builtin.systemd:
+        name: freeipa-crl-export.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+      become: true
+      tags:
+        - freeipa_crl
+        - schedule
+        - systemd
+
+    - name: "Verify timer is active"
+      ansible.builtin.command:
+        cmd: "systemctl status freeipa-crl-export.timer"
+      changed_when: false
+      become: true
+      register: timer_status
+      tags:
+        - freeipa_crl
+        - schedule
+        - systemd
+
+    - name: "Display timer status"
+      ansible.builtin.debug:
+        msg: |
+          ✅ SYSTEMD TIMER INSTALLED
+          
+          Service: /etc/systemd/system/freeipa-crl-export.service
+          Timer: /etc/systemd/system/freeipa-crl-export.timer
+          Schedule: Every 2 hours (00, 02, 04... minutes)
+          
+          Monitor with:
+          - systemctl status freeipa-crl-export.timer
+          - journalctl -u freeipa-crl-export.service -f
+          - systemctl list-timers freeipa-crl-export.timer
+      tags:
+        - freeipa_crl
+        - schedule
+        - systemd
+
+  when: freeipa_export_method == "systemd-timer"
+  tags:
+    - freeipa_crl
+    - schedule
+
+# ============================================
+# CRON - FALLBACK OPTION
+# ============================================
+
+- name: "Setup CRL export with CRON (FALLBACK)"
+  block:
+    - name: "Create cron job for CRL export"
+      ansible.builtin.cron:
+        name: "FreeIPA CRL Export (Every 2 hours)"
+        job: "/usr/local/bin/freeipa-crl-export.sh >> /var/log/crl-management/freeipa-crl.log 2>&1"
+        minute: "0"
+        hour: "*/2"
+        user: root
+        cron_file: "freeipa-crl-export"
+      become: true
+      tags:
+        - freeipa_crl
+        - schedule
+        - cron
+
+    - name: "Display cron setup"
+      ansible.builtin.debug:
+        msg: |
+          ⚠️ CRON JOB INSTALLED (Fallback option)
+          
+          Cron file: /etc/cron.d/freeipa-crl-export
+          Schedule: Every 2 hours
+          
+          For better reliability, consider switching to systemd-timer:
+          - Better logging (journalctl)
+          - Automatic retry on failure
+          - State tracking across reboots
+          - Better systemd integration
+      tags:
+        - freeipa_crl
+        - schedule
+        - cron
+
+  when: freeipa_export_method == "cron"
+  tags:
+    - freeipa_crl
+    - schedule
+
+- name: "Log scheduling completion"
+  ansible.builtin.lineinfile:
+    path: "{{ freeipa_log_file }}"
+    line: "[{{ ansible_date_time.iso8601 }}] ✅ CRL export scheduled - Method: {{ freeipa_export_method }}"
+    create: true
+  become: true
+  tags:
+    - freeipa_crl
+    - schedule
+    - logging
+
+- name: "Display scheduling method"
+  ansible.builtin.debug:
+    msg: |
+      CRL Export Scheduler Configured
+      
+      Method: {{ freeipa_export_method | upper }}
+      
+      {% if freeipa_export_method == "systemd-timer" %}
+      ✅ RECOMMENDED: systemd-timer
+      
+      Advantages:
+      - Real-time logging via journalctl
+      - Automatic retry on failure
+      - State persistence across reboots
+      - Better integration with systemd
+      - Can depend on network.target
+      - OnBootSec for missed runs
+      
+      View logs:
+      $ journalctl -u freeipa-crl-export.service -f
+      
+      Check timer:
+      $ systemctl list-timers freeipa-crl-export.timer
+      
+      {% else %}
+      ⚠️ Fallback: cron
+      
+      This works but lacks reliability features.
+      Consider switching to systemd-timer for:
+      - Better error handling
+      - Real-time logging
+      - Automatic retries
+      {% endif %}
+  tags:
+    - freeipa_crl
+    - schedule
+    - debug

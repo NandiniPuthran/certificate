@@ -1,0 +1,29 @@
+# roles/application_crl/meta/main.yml
+
+---
+
+galaxy_info:
+  author: "Enterprise PKI Team"
+  description: "Configure applications to use CRL with soft-fail strategy"
+  license: "MIT"
+  min_ansible_version: "2.9"
+  platforms:
+    - name: EL
+      versions: [7, 8, 9]
+    - name: Ubuntu
+      versions: [18.04, 20.04, 22.04]
+  galaxy_tags:
+    - crl
+    - pki
+    - apache
+    - haproxy
+    - sssd
+    - rsyslog
+    - etcd
+    - freeradius
+
+dependencies: []
+
+tags:
+  - application_crl
+  - configuration

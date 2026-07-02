@@ -1,0 +1,42 @@
+# roles/application_crl/tasks/sssd.yml
+# Configure SSSD with LDAP server CRL validation
+
+---
+
+- name: "Configure SSSD LDAP CRL"
+  block:
+    - name: "Create /etc/openldap/ldap.conf if not exists"
+      ansible.builtin.file:
+        path: /etc/openldap/ldap.conf
+        state: touch
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      tags:
+        - application_crl
+        - sssd
+
+    - name: "Add TLS_CRLFILE to ldap.conf"
+      ansible.builtin.lineinfile:
+        path: /etc/openldap/ldap.conf
+        line: "TLS_CRLFILE {{ sssd_crl_file }}"
+        state: present
+      become: true
+      tags:
+        - application_crl
+        - sssd
+
+    - name: "Log SSSD CRL configuration"
+      ansible.builtin.lineinfile:
+        path: "{{ application_crl_log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] SSSD LDAP CRL configured: {{ sssd_crl_file }} (soft-fail)"
+        create: true
+      become: true
+      tags:
+        - application_crl
+        - sssd
+
+  tags:
+    - application_crl
+    - sssd

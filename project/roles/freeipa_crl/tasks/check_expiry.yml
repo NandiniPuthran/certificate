@@ -1,0 +1,168 @@
+# roles/freeipa_crl/tasks/check_expiry.yml
+# CRITICAL: Check CRL expiry against 4-hour validity window
+
+---
+
+- name: "Calculate CRL expiry time"
+  block:
+    - name: "Parse nextUpdate timestamp"
+      ansible.builtin.shell:
+        cmd: |
+          openssl crl -in {{ freeipa_crl_output_file }} -noout -text | grep "Next Update" | head -1 | sed 's/.*Next Update: //'
+        timeout: 30
+      changed_when: false
+      register: crl_nextupdate_raw
+      tags:
+        - freeipa_crl
+        - expiry
+
+    - name: "Get current time in seconds since epoch"
+      ansible.builtin.command:
+        cmd: "date +%s"
+      changed_when: false
+      register: current_time_epoch
+      tags:
+        - freeipa_crl
+        - expiry
+
+    - name: "Parse nextUpdate to epoch (GMT)"
+      ansible.builtin.shell:
+        cmd: |
+          date -d "{{ crl_nextupdate_raw.stdout }}" +%s 2>/dev/null || date -jf "%b %d %H:%M:%S %Y %Z" "{{ crl_nextupdate_raw.stdout }}" +%s 2>/dev/null || echo "0"
+        timeout: 10
+      changed_when: false
+      register: crl_nextupdate_epoch
+      tags:
+        - freeipa_crl
+        - expiry
+
+    - name: "Calculate hours until expiry"
+      ansible.builtin.set_fact:
+        crl_hours_until_expiry: "{{ ((crl_nextupdate_epoch.stdout | int) - (current_time_epoch.stdout | int)) // 3600 }}"
+      tags:
+        - freeipa_crl
+        - expiry
+
+    - name: "Display time until expiry"
+      ansible.builtin.debug:
+        msg: |
+          CRL Expiry Status:
+          - NextUpdate: {{ crl_nextupdate_raw.stdout }}
+          - Hours until expiry: {{ crl_hours_until_expiry }}
+          - Current time: {{ ansible_date_time.iso8601 }}
+      tags:
+        - freeipa_crl
+        - expiry
+        - debug
+
+  tags:
+    - freeipa_crl
+    - expiry
+
+- name: "Check CRL validity - CRITICAL 4-HOUR WINDOW"
+  block:
+    - name: "CRITICAL: CRL already expired!"
+      block:
+        - name: "Log CRITICAL expiry"
+          ansible.builtin.lineinfile:
+            path: "{{ freeipa_log_file }}"
+            line: "[{{ ansible_date_time.iso8601 }}] 🔴 CRITICAL: CRL HAS EXPIRED! NextUpdate was: {{ crl_nextupdate_raw.stdout }}"
+            create: true
+          become: true
+          tags:
+            - freeipa_crl
+            - expiry
+
+        - name: "Create critical alert file"
+          ansible.builtin.copy:
+            content: |
+              CRL EXPIRED
+              NextUpdate: {{ crl_nextupdate_raw.stdout }}
+              Time of check: {{ ansible_date_time.iso8601 }}
+              Action required: Manually trigger CRL export
+            dest: /var/log/crl-management/crl-expired.alert
+            owner: root
+            group: root
+            mode: '0644'
+          become: true
+          tags:
+            - freeipa_crl
+            - expiry
+
+        - name: "Fail with critical message"
+          ansible.builtin.fail:
+            msg: |
+              🔴 CRITICAL: CRL HAS EXPIRED!
+              NextUpdate: {{ crl_nextupdate_raw.stdout }}
+              Clients will NOT accept this CRL.
+              Action: Manually trigger ansible-playbook to re-export immediately.
+          tags:
+            - freeipa_crl
+            - expiry
+
+      when: crl_hours_until_expiry | int <= 0
+      tags:
+        - freeipa_crl
+        - expiry
+
+    - name: "WARNING: CRL expires soon (< 1.5 hours)"
+      block:
+        - name: "Log WARNING for near-expiry"
+          ansible.builtin.lineinfile:
+            path: "{{ freeipa_log_file }}"
+            line: "[{{ ansible_date_time.iso8601 }}] ⚠️  WARNING: CRL expires in {{ crl_hours_until_expiry }} hours (NextUpdate: {{ crl_nextupdate_raw.stdout }})"
+            create: true
+          become: true
+          tags:
+            - freeipa_crl
+            - expiry
+
+        - name: "Create warning alert file"
+          ansible.builtin.copy:
+            content: |
+              CRL EXPIRING SOON
+              Hours until expiry: {{ crl_hours_until_expiry }}
+              NextUpdate: {{ crl_nextupdate_raw.stdout }}
+              Time of check: {{ ansible_date_time.iso8601 }}
+              Action: Monitor closely, next scheduled pull should occur before expiry
+            dest: /var/log/crl-management/crl-expiring-soon.alert
+            owner: root
+            group: root
+            mode: '0644'
+          become: true
+          tags:
+            - freeipa_crl
+            - expiry
+
+      when:
+        - crl_hours_until_expiry | int > 0
+        - crl_hours_until_expiry | int < freeipa_crl_min_validity_hours | int
+      tags:
+        - freeipa_crl
+        - expiry
+
+    - name: "OK: CRL validity is good"
+      ansible.builtin.debug:
+        msg: "✅ CRL valid for {{ crl_hours_until_expiry }} hours (minimum required: {{ freeipa_crl_min_validity_hours }})"
+      when: crl_hours_until_expiry | int >= freeipa_crl_min_validity_hours | int
+      tags:
+        - freeipa_crl
+        - expiry
+        - debug
+
+  tags:
+    - freeipa_crl
+    - expiry
+
+- name: "Store expiry metadata"
+  ansible.builtin.set_fact:
+    crl_expiry_info:
+      nextupdate: "{{ crl_nextupdate_raw.stdout }}"
+      hours_until_expiry: "{{ crl_hours_until_expiry }}"
+      critical_threshold_hours: "{{ freeipa_crl_critical_validity_hours }}"
+      warning_threshold_hours: "{{ freeipa_crl_min_validity_hours }}"
+      check_time: "{{ ansible_date_time.iso8601 }}"
+  tags:
+    - freeipa_crl
+    - expiry
+    - variables

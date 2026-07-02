@@ -1,0 +1,85 @@
+# roles/application_crl/tasks/main.yml
+# Configure applications to use CRL with SOFT-FAIL strategy
+
+---
+
+- name: "Create log directory"
+  ansible.builtin.file:
+    path: "{{ application_crl_log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags:
+    - application_crl
+    - setup
+
+- name: "Verify CRL file exists"
+  ansible.builtin.stat:
+    path: "{{ application_crl_file_path }}"
+  register: crl_file_stat
+  failed_when: not crl_file_stat.stat.exists
+  tags:
+    - application_crl
+    - validation
+
+- name: "Configure Apache mod_ssl with soft-fail CRL checking"
+  ansible.builtin.include_tasks: apache-ssl.yml
+  when: application_crl_type == 'apache' or application_crl_type == 'all'
+  tags:
+    - application_crl
+    - apache
+
+- name: "Configure HAProxy with CRL validation"
+  ansible.builtin.include_tasks: haproxy.yml
+  when: application_crl_type == 'haproxy' or application_crl_type == 'all'
+  tags:
+    - application_crl
+    - haproxy
+
+- name: "Configure SSSD with LDAP CRL checking"
+  ansible.builtin.include_tasks: sssd.yml
+  when: application_crl_type == 'sssd' or application_crl_type == 'all'
+  tags:
+    - application_crl
+    - sssd
+
+- name: "Configure rsyslog with ossl driver and CRL"
+  ansible.builtin.include_tasks: rsyslog.yml
+  when: application_crl_type == 'rsyslog' or application_crl_type == 'all'
+  tags:
+    - application_crl
+    - rsyslog
+
+- name: "Configure etcd with CRL checking"
+  ansible.builtin.include_tasks: etcd.yml
+  when: application_crl_type == 'etcd' or application_crl_type == 'all'
+  tags:
+    - application_crl
+    - etcd
+
+- name: "Configure FreeRADIUS for EAP-TLS with CRL"
+  ansible.builtin.include_tasks: freeradius.yml
+  when: application_crl_type == 'freeradius' or application_crl_type == 'all'
+  tags:
+    - application_crl
+    - freeradius
+
+- name: "Display application CRL configuration summary"
+  ansible.builtin.debug:
+    msg: |
+      ✅ Application CRL Configuration Complete
+      - CRL File: {{ application_crl_file_path }}
+      - Soft-Fail Strategy: Enabled
+      - Application Type(s): {{ application_crl_type }}
+      - Logs: {{ application_crl_log_file }}
+      
+      SOFT-FAIL Behavior:
+      - ✅ Revoked certs still checked and rejected
+      - ✅ Expired/missing CRL doesn't break service
+      - ⚠️ Admin alerted on CRL age/validity issues
+      - 📋 Applications continue with best-effort validation
+  tags:
+    - application_crl
+    - debug

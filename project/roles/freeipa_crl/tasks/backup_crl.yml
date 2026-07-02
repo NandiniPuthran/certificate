@@ -1,0 +1,67 @@
+# roles/freeipa_crl/tasks/backup_crl.yml
+# Backup CRL with retention policy
+
+---
+
+- name: "Create backup directory"
+  ansible.builtin.file:
+    path: "{{ freeipa_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+  tags:
+    - freeipa_crl
+    - backup
+
+- name: "Backup current CRL"
+  ansible.builtin.copy:
+    src: "{{ freeipa_crl_output_file }}"
+    dest: "{{ freeipa_backup_dir }}/ca-{{ ansible_date_time.iso8601_basic }}.crl"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+  become: true
+  tags:
+    - freeipa_crl
+    - backup
+
+- name: "Clean old backups (retention policy)"
+  block:
+    - name: "Find old backup files"
+      ansible.builtin.find:
+        paths: "{{ freeipa_backup_dir }}"
+        age: "{{ freeipa_backup_retention_days }}d"
+        file_type: file
+      register: old_crl_backups
+      tags:
+        - freeipa_crl
+        - backup
+        - cleanup
+
+    - name: "Remove expired CRL backups"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_crl_backups.files }}"
+      become: true
+      tags:
+        - freeipa_crl
+        - backup
+        - cleanup
+
+    - name: "Log backup cleanup"
+      ansible.builtin.debug:
+        msg: "Cleaned up {{ old_crl_backups.files | length }} expired backup files"
+      when: old_crl_backups.files | length > 0
+      tags:
+        - freeipa_crl
+        - backup
+        - cleanup
+        - debug
+
+  tags:
+    - freeipa_crl
+    - backup

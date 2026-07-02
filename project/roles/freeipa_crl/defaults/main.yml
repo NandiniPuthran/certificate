@@ -1,0 +1,47 @@
+# roles/freeipa_crl/defaults/main.yml
+# FreeIPA CRL extraction and validation - every 2 hours
+
+---
+
+# FreeIPA server connectivity
+freeipa_server: "ipa.example.com"
+freeipa_realm: "EXAMPLE.COM"
+freeipa_timeout: 30
+freeipa_verify_ssl: true
+
+# CRL export settings
+freeipa_crl_export_dir: /tmp/freeipa-crl-export
+freeipa_crl_output_file: "{{ freeipa_crl_export_dir }}/ca.crl"
+freeipa_crl_owner: root
+freeipa_crl_group: root
+freeipa_crl_permissions: '0644'
+
+# Export schedule - CRITICAL: Must be every 2 hours to beat 4-hour expiry
+freeipa_export_schedule: "0 */2 * * *"
+freeipa_export_method: systemd-timer  # RECOMMENDED for reliability (or cron as fallback)
+
+# CRL validation settings
+freeipa_validate_crl: true
+freeipa_validate_signature: false  # Optional - only if CA cert available
+freeipa_ca_cert_path: /etc/ipa/ca.crt
+
+# Expiry checking - CRITICAL for 4-hour window
+freeipa_crl_min_validity_hours: 2.5  # Warn if expires in less than this
+freeipa_crl_critical_validity_hours: 1  # Critical if expires in less than this
+
+# Backup configuration
+freeipa_backup_crl: true
+freeipa_backup_dir: /var/backups/crl-management/freeipa
+freeipa_backup_retention_days: 30
+
+# Logging
+freeipa_log_dir: /var/log/crl-management
+freeipa_log_file: "{{ freeipa_log_dir }}/freeipa-crl.log"
+
+# Retry configuration
+freeipa_retry_attempts: 3
+freeipa_retry_delay: 5
+
+# Alert configuration
+freeipa_alert_on_expiry_warning: true
+freeipa_alert_on_validation_failure: true

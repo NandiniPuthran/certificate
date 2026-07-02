@@ -1,0 +1,31 @@
+# roles/apache_crl/templates/crl-headers.conf.j2
+# HTTP Headers for CRL files
+
+# CRL file headers
+<FilesMatch "\.crl$">
+    Header set Content-Type "application/pkix-crl"
+    Header set Content-Disposition "inline"
+    
+    # Allow all to download CRL
+    Require all granted
+    
+    # Caching policy
+    Header set Cache-Control "public, max-age=3600, must-revalidate"
+    Header set Pragma "public"
+    
+    # Security headers
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "DENY"
+</FilesMatch>
+
+# HTML files
+<FilesMatch "\.html?$">
+    Header set Content-Type "text/html; charset=utf-8"
+    Header set Cache-Control "public, max-age=3600"
+</FilesMatch>
+
+# Disable ETag for consistency
+<FilesMatch ".*">
+    Header unset ETag
+    FileETag None
+</FilesMatch>

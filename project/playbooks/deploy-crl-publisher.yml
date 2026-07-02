@@ -1,0 +1,47 @@
+# playbooks/deploy-crl-publisher.yml
+# Deploy CRL publisher (FreeIPA + Apache)
+
+---
+
+- name: "Deploy CRL Publisher Server"
+  hosts: crl_servers
+  become: true
+  gather_facts: true
+  
+  tasks:
+    - name: "FreeIPA CRL Export (Every 2 hours)"
+      ansible.builtin.include_role:
+        name: freeipa_crl
+      tags:
+        - crl_publisher
+        - freeipa_crl
+
+    - name: "Apache CRL Hosting"
+      ansible.builtin.include_role:
+        name: apache_crl
+      tags:
+        - crl_publisher
+        - apache_crl
+
+    - name: "Deployment Summary"
+      ansible.builtin.debug:
+        msg: |
+          ✅ CRL Publisher Deployed Successfully
+          
+          FreeIPA Export:
+          - Schedule: Every 2 hours
+          - CRL File: /tmp/freeipa-crl-export/ca.crl
+          - Validity: 4 hours (monitored)
+          
+          Apache Hosting:
+          - HTTP: http://crl.example.com/crl/ca.crl
+          - HTTPS: https://crl.example.com/crl/ca.crl
+          - No client cert validation on server
+          
+          Next Steps:
+          1. Deploy CRL clients on application servers
+          2. Configure applications to use CRL
+          3. Monitor CRL updates in logs
+      tags:
+        - crl_publisher
+        - debug

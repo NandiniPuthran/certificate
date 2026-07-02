@@ -1,0 +1,272 @@
+# roles/apache_crl/tasks/main.yml
+# Apache CRL server setup and publishing
+
+---
+
+- name: "Apache CRL Server Setup"
+  block:
+    - name: "Install Apache"
+      ansible.builtin.package:
+        name: "{{ apache_package_name }}"
+        state: present
+      become: true
+      tags:
+        - apache_crl
+        - install
+
+    - name: "Enable Apache service"
+      ansible.builtin.systemd:
+        name: "{{ apache_service_name }}"
+        enabled: true
+        daemon_reload: true
+      become: true
+      tags:
+        - apache_crl
+        - service
+
+    - name: "Create CRL directories"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ apache_user }}"
+        group: "{{ apache_group }}"
+        mode: '0755'
+      loop:
+        - "{{ apache_document_root }}"
+        - "{{ apache_crl_directory }}"
+      become: true
+      tags:
+        - apache_crl
+        - directories
+
+    - name: "Create log directory"
+      ansible.builtin.file:
+        path: "{{ apache_log_dir }}"
+        state: directory
+        owner: "{{ apache_user }}"
+        group: "{{ apache_group }}"
+        mode: '0755'
+      become: true
+      tags:
+        - apache_crl
+        - logging
+
+    - name: "Create landing page"
+      ansible.builtin.copy:
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>CRL Server</title>
+            <style>body { font-family: Arial; margin: 40px; }</style>
+          </head>
+          <body>
+            <h1>Certificate Revocation List Server</h1>
+            <p>CRL available at: <a href="/crl/ca.crl">/crl/ca.crl</a></p>
+            <p>Last updated: {{ ansible_date_time.iso8601 }}</p>
+          </body>
+          </html>
+        dest: "{{ apache_document_root }}/index.html"
+        owner: "{{ apache_user }}"
+        group: "{{ apache_group }}"
+        mode: '0644'
+      become: true
+      when: apache_landing_page_enabled | bool
+      tags:
+        - apache_crl
+        - landing_page
+
+    - name: "Verify SSL certificates exist"
+      ansible.builtin.stat:
+        path: "{{ apache_ssl_cert_file }}"
+      register: ssl_cert_stat
+      failed_when: not ssl_cert_stat.stat.exists
+      when: apache_ssl_enabled | bool
+      tags:
+        - apache_crl
+        - ssl
+
+    - name: "Create HTTP virtual host"
+      ansible.builtin.template:
+        src: vhost-http.conf.j2
+        dest: "{{ apache_config_enabled_dir }}/crl-http.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      notify: "restart apache"
+      tags:
+        - apache_crl
+        - configuration
+
+    - name: "Create HTTPS virtual host"
+      ansible.builtin.template:
+        src: vhost-https.conf.j2
+        dest: "{{ apache_config_enabled_dir }}/crl-https.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      when: apache_ssl_enabled | bool
+      notify: "restart apache"
+      tags:
+        - apache_crl
+        - configuration
+
+    - name: "Create security headers configuration"
+      ansible.builtin.template:
+        src: crl-headers.conf.j2
+        dest: "{{ apache_config_enabled_dir }}/crl-headers.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      notify: "reload apache"
+      tags:
+        - apache_crl
+        - headers
+
+    - name: "Test Apache configuration"
+      ansible.builtin.command:
+        cmd: "{{ apache_config_dir }}/bin/apachectl configtest"
+      changed_when: false
+      become: true
+      tags:
+        - apache_crl
+        - validation
+
+    - name: "Setup firewall rules"
+      block:
+        - name: "Open HTTP port"
+          ansible.posix.firewalld:
+            service: http
+            permanent: true
+            state: enabled
+          become: true
+          when: apache_firewall_allow_http | bool and apache_firewall_backend == 'firewalld'
+          tags:
+            - apache_crl
+            - firewall
+
+        - name: "Open HTTPS port"
+          ansible.posix.firewalld:
+            service: https
+            permanent: true
+            state: enabled
+          become: true
+          when: apache_ssl_enabled | bool and apache_firewall_allow_https | bool and apache_firewall_backend == 'firewalld'
+          tags:
+            - apache_crl
+            - firewall
+
+      tags:
+        - apache_crl
+        - firewall
+
+    - name: "Configure SELinux contexts"
+      block:
+        - name: "Set SELinux context for document root"
+          ansible.posix.sefcontext:
+            target: "{{ apache_document_root }}(/.*)?"
+            setype: "{{ apache_selinux_file_context }}"
+            state: present
+          become: true
+          when: apache_selinux_enabled | bool
+          tags:
+            - apache_crl
+            - selinux
+
+        - name: "Restore SELinux contexts"
+          ansible.builtin.command:
+            cmd: "restorecon -Rv {{ apache_document_root }}"
+          become: true
+          when: apache_selinux_enabled | bool
+          tags:
+            - apache_crl
+            - selinux
+
+      tags:
+        - apache_crl
+        - selinux
+
+    - name: "Publish CRL to Apache"
+      block:
+        - name: "Verify CRL source exists"
+          ansible.builtin.stat:
+            path: "{{ crl_source_path }}"
+          register: crl_source_stat
+          failed_when: not crl_source_stat.stat.exists
+          tags:
+            - apache_crl
+            - publish
+
+        - name: "Copy CRL to Apache document root"
+          ansible.builtin.copy:
+            src: "{{ crl_source_path }}"
+            dest: "{{ apache_crl_filepath }}"
+            remote_src: true
+            owner: "{{ apache_user }}"
+            group: "{{ apache_group }}"
+            mode: '0644'
+            backup: true
+          become: true
+          tags:
+            - apache_crl
+            - publish
+
+        - name: "Verify CRL is published"
+          ansible.builtin.stat:
+            path: "{{ apache_crl_filepath }}"
+          register: published_crl_stat
+          failed_when: not published_crl_stat.stat.exists or published_crl_stat.stat.size == 0
+          tags:
+            - apache_crl
+            - publish
+
+      tags:
+        - apache_crl
+        - publish
+
+    - name: "Start Apache service"
+      ansible.builtin.systemd:
+        name: "{{ apache_service_name }}"
+        state: "{{ apache_state }}"
+        enabled: "{{ apache_enabled }}"
+      become: true
+      tags:
+        - apache_crl
+        - service
+
+    - name: "Verify Apache is running"
+      ansible.builtin.wait_for:
+        host: localhost
+        port: "{{ apache_listen_port }}"
+        timeout: 30
+      tags:
+        - apache_crl
+        - verification
+
+    - name: "Test CRL is downloadable"
+      ansible.builtin.get_url:
+        url: "http://localhost:{{ apache_listen_port }}/crl/{{ apache_crl_filename }}"
+        dest: /tmp/test-crl.crl
+        timeout: 10
+      register: crl_download_test
+      tags:
+        - apache_crl
+        - verification
+
+    - name: "Display deployment summary"
+      ansible.builtin.debug:
+        msg: |
+          ✅ Apache CRL Server Deployed
+          - HTTP: http://{{ apache_vhost_name }}:{{ apache_listen_port }}/crl/{{ apache_crl_filename }}
+          - HTTPS: https://{{ apache_vhost_name }}:{{ apache_listen_ssl_port }}/crl/{{ apache_crl_filename }}
+          - Location: {{ apache_crl_filepath }}
+          - Service: {{ apache_service_name }} ({{ apache_state }})
+      tags:
+        - apache_crl
+        - debug
+
+  tags:
+    - apache_crl

@@ -1,0 +1,36 @@
+# roles/freeipa_crl/meta/main.yml
+# Metadata for FreeIPA CRL export role
+
+---
+
+galaxy_info:
+  author: "Enterprise PKI Team"
+  description: "FreeIPA CRL extraction and validation"
+  company: "Your Organization"
+  license: "MIT"
+  min_ansible_version: "2.9"
+  platforms:
+    - name: EL
+      versions:
+        - 7
+        - 8
+        - 9
+    - name: Ubuntu
+      versions:
+        - 18.04
+        - 20.04
+        - 22.04
+  galaxy_tags:
+    - crl
+    - pki
+    - freeipa
+    - certificate
+    - revocation
+
+# No external role dependencies
+dependencies: []
+
+tags:
+  - freeipa_crl
+  - export
+  - critical

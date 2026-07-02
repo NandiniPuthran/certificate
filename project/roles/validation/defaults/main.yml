@@ -1,0 +1,7 @@
+# roles/validation/defaults/main.yml
+
+---
+
+validation_crl_server: "crl.example.com"
+validation_download_timeout: 30
+validation_log_dir: /var/log/crl-management

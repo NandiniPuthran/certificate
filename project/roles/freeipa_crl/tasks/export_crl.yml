@@ -1,0 +1,133 @@
+# roles/freeipa_crl/tasks/export_crl.yml
+# Export CRL from FreeIPA
+
+---
+
+- name: "Create CRL export directory"
+  ansible.builtin.file:
+    path: "{{ freeipa_crl_export_dir }}"
+    state: directory
+    owner: "{{ freeipa_crl_owner }}"
+    group: "{{ freeipa_crl_group }}"
+    mode: '0755'
+  become: true
+  tags:
+    - freeipa_crl
+    - export
+
+- name: "Export CRL from FreeIPA"
+  block:
+    - name: "Fetch CRL via HTTP"
+      ansible.builtin.get_url:
+        url: "http://{{ freeipa_server }}/ca/crl/cacert.crl"
+        dest: "{{ freeipa_crl_output_file }}"
+        owner: "{{ freeipa_crl_owner }}"
+        group: "{{ freeipa_crl_group }}"
+        mode: "{{ freeipa_crl_permissions }}"
+        timeout: "{{ freeipa_timeout }}"
+        force: true
+      become: true
+      register: crl_fetch_http
+      retries: "{{ freeipa_retry_attempts }}"
+      delay: "{{ freeipa_retry_delay }}"
+      until: crl_fetch_http is succeeded
+      tags:
+        - freeipa_crl
+        - export
+        - download
+
+  rescue:
+    - name: "Try HTTPS CRL fetch"
+      block:
+        - name: "Fetch CRL via HTTPS"
+          ansible.builtin.get_url:
+            url: "https://{{ freeipa_server }}/ca/crl/cacert.crl"
+            dest: "{{ freeipa_crl_output_file }}"
+            owner: "{{ freeipa_crl_owner }}"
+            group: "{{ freeipa_crl_group }}"
+            mode: "{{ freeipa_crl_permissions }}"
+            timeout: "{{ freeipa_timeout }}"
+            force: true
+            validate_certs: "{{ freeipa_verify_ssl | bool }}"
+          become: true
+          register: crl_fetch_https
+          retries: "{{ freeipa_retry_attempts }}"
+          delay: "{{ freeipa_retry_delay }}"
+          until: crl_fetch_https is succeeded
+          tags:
+            - freeipa_crl
+            - export
+            - download
+
+      rescue:
+        - name: "Log CRL export failure"
+          ansible.builtin.lineinfile:
+            path: "{{ freeipa_log_file }}"
+            line: "[{{ ansible_date_time.iso8601 }}] CRITICAL: CRL export failed"
+            create: true
+          become: true
+          tags:
+            - freeipa_crl
+            - export
+
+        - name: "Fail with error"
+          ansible.builtin.fail:
+            msg: |
+              Failed to export CRL from FreeIPA {{ freeipa_server }}
+              Tried: http://{{ freeipa_server }}/ca/crl/cacert.crl
+              Tried: https://{{ freeipa_server }}/ca/crl/cacert.crl
+          tags:
+            - freeipa_crl
+            - export
+
+      tags:
+        - freeipa_crl
+        - export
+
+  tags:
+    - freeipa_crl
+    - export
+
+- name: "Verify CRL was exported"
+  block:
+    - name: "Check CRL file exists"
+      ansible.builtin.stat:
+        path: "{{ freeipa_crl_output_file }}"
+      register: crl_file_stat
+      tags:
+        - freeipa_crl
+        - export
+
+    - name: "Assert CRL file is valid"
+      ansible.builtin.assert:
+        that:
+          - crl_file_stat.stat.exists
+          - crl_file_stat.stat.size > 0
+        fail_msg: "CRL file export failed or file is empty"
+      tags:
+        - freeipa_crl
+        - export
+
+    - name: "Display CRL export information"
+      ansible.builtin.debug:
+        msg: |
+          CRL Export Successful:
+          - File: {{ freeipa_crl_output_file }}
+          - Size: {{ crl_file_stat.stat.size }} bytes
+          - Modified: {{ crl_file_stat.stat.mtime | ansible.builtin.strftime('%Y-%m-%d %H:%M:%S') }}
+      tags:
+        - freeipa_crl
+        - export
+        - debug
+
+  tags:
+    - freeipa_crl
+    - export
+
+- name: "Set CRL file path variable"
+  ansible.builtin.set_fact:
+    crl_file_to_publish: "{{ freeipa_crl_output_file }}"
+  tags:
+    - freeipa_crl
+    - export
+    - variables

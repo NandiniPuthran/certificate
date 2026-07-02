@@ -1,0 +1,34 @@
+# roles/crl_client/handlers/main.yml
+
+---
+
+- name: "crl updated"
+  ansible.builtin.debug:
+    msg: "CRL has been updated. Applications using it should verify the new version."
+  listen: "crl updated"
+  tags:
+    - crl_client
+    - handlers
+
+---
+# roles/crl_client/meta/main.yml
+
+galaxy_info:
+  author: "Enterprise PKI Team"
+  description: "CRL distribution and automated updates"
+  license: "MIT"
+  min_ansible_version: "2.9"
+  platforms:
+    - name: EL
+      versions: [7, 8, 9]
+    - name: Ubuntu
+      versions: [18.04, 20.04, 22.04]
+  galaxy_tags:
+    - crl
+    - pki
+
+dependencies: []
+
+tags:
+  - crl_client
+  - distribution
