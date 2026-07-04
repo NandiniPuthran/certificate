@@ -1,0 +1,228 @@
+---
+# Configure Apache for CRL serving
+
+- name: "Detect Current Apache Configuration"
+  block:
+    - name: "Check if Listen 9443 exists in ports.conf"
+      ansible.builtin.lineinfile:
+        path: /etc/apache2/ports.conf
+        line: "Listen {{ apache_listen_ssl_port }}"
+        state: present
+      become: true
+      check_mode: true
+      register: listen_check
+      failed_when: false
+      tags:
+        - configure
+
+    - name: "Check if CRL VirtualHost already exists"
+      ansible.builtin.stat:
+        path: "{{ apache_enabled_dir }}/crl-https.conf"
+      become: true
+      register: vhost_file
+      tags:
+        - configure
+
+    - name: "Display Current Configuration"
+      ansible.builtin.debug:
+        msg: |
+          Current Apache Configuration:
+          - Listen 9443 present: {{ not listen_check.changed }}
+          - CRL VirtualHost present: {{ vhost_file.stat.exists }}
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Configure Directories =====
+- name: "Create and Configure Directories"
+  block:
+    - name: "Create CRL directory"
+      ansible.builtin.file:
+        path: "{{ apache_crl_directory }}"
+        state: directory
+        owner: "{{ apache_user }}"
+        group: "{{ apache_group }}"
+        mode: '0755'
+      become: true
+      tags:
+        - configure
+
+    - name: "Create document root"
+      ansible.builtin.file:
+        path: "{{ apache_document_root }}"
+        state: directory
+        owner: "{{ apache_user }}"
+        group: "{{ apache_group }}"
+        mode: '0755'
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Directory Structure"
+      ansible.builtin.debug:
+        msg: |
+          Directories Created:
+          - CRL directory: {{ apache_crl_directory }} ✅
+          - Document root: {{ apache_document_root }} ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Copy CRL File =====
+- name: "Copy CRL File from crl_publisher"
+  block:
+    - name: "Verify source CRL file exists"
+      ansible.builtin.stat:
+        path: "{{ crl_source_path }}"
+      become: true
+      register: source_crl
+      failed_when: not source_crl.stat.exists
+      tags:
+        - configure
+
+    - name: "Copy CRL file to Apache directory"
+      ansible.builtin.copy:
+        src: "{{ crl_source_path }}"
+        dest: "{{ apache_crl_filepath }}"
+        remote_src: true
+        owner: "{{ apache_user }}"
+        group: "{{ apache_group }}"
+        mode: '0644'
+      become: true
+      register: crl_copy
+      tags:
+        - configure
+
+    - name: "Display CRL File Status"
+      ansible.builtin.debug:
+        msg: |
+          CRL File:
+          - Source: {{ crl_source_path }}
+          - Destination: {{ apache_crl_filepath }}
+          - Owner: {{ apache_user }}:{{ apache_group }}
+          - Permissions: 644 (readable by all)
+          - Status: {{ 'Copied ✅' if crl_copy.changed else 'Already present ✅' }}
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Configure ports.conf =====
+- name: "Update ports.conf (Add Listen 9443)"
+  block:
+    - name: "Add Listen 9443 to ports.conf (if not present)"
+      ansible.builtin.lineinfile:
+        path: /etc/apache2/ports.conf
+        line: "Listen {{ apache_listen_ssl_port }}"
+        state: present
+        insertafter: "EOF"
+      become: true
+      register: listen_added
+      notify: "restart apache"
+      tags:
+        - configure
+
+    - name: "Display ports.conf Update"
+      ansible.builtin.debug:
+        msg: |
+          ports.conf Configuration:
+          - Listen 9443: {{ 'Added ✅' if listen_added.changed else 'Already present ✅' }}
+          - Non-destructive: Existing ports preserved ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Create CRL VirtualHost =====
+- name: "Create CRL VirtualHost Configuration"
+  block:
+    - name: "Create crl-https.conf from template"
+      ansible.builtin.template:
+        src: crl-https.conf.j2
+        dest: "{{ apache_enabled_dir }}/crl-https.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      register: vhost_created
+      notify: "restart apache"
+      tags:
+        - configure
+
+    - name: "Display VirtualHost Status"
+      ansible.builtin.debug:
+        msg: |
+          VirtualHost Configuration:
+          - File: {{ apache_enabled_dir }}/crl-https.conf
+          - Status: {{ 'Created ✅' if not vhost_file.stat.exists else 'Updated ✅' }}
+          - Server Name: {{ apache_vhost_name }}
+          - Listen Port: {{ apache_listen_ssl_port }}
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Test Configuration =====
+- name: "Test Apache Configuration"
+  block:
+    - name: "Test Apache syntax"
+      ansible.builtin.command:
+        cmd: "apache2ctl configtest"
+      become: true
+      register: apache_test
+      failed_when: "'Syntax OK' not in apache_test.stdout"
+      tags:
+        - configure
+
+    - name: "Display Configuration Test Result"
+      ansible.builtin.debug:
+        msg: |
+          Apache Configuration Test:
+          - Status: {{ 'Syntax OK ✅' if 'Syntax OK' in apache_test.stdout else 'Failed ❌' }}
+          - Ready to restart: Yes ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Restart Apache =====
+- name: "Restart Apache to Apply Changes"
+  block:
+    - name: "Restart Apache service"
+      ansible.builtin.systemd:
+        name: "{{ apache_service_name }}"
+        state: restarted
+      become: true
+      when: listen_added.changed or vhost_created.changed
+      tags:
+        - configure
+
+    - name: "Ensure Apache is enabled"
+      ansible.builtin.systemd:
+        name: "{{ apache_service_name }}"
+        enabled: true
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Apache Restart Status"
+      ansible.builtin.debug:
+        msg: |
+          Apache Service Status:
+          - Service: {{ apache_service_name }}
+          - State: Running ✅
+          - Enabled: Yes ✅
+          - Changes applied: {{ 'Yes - Restarted ✅' if listen_added.changed or vhost_created.changed else 'No changes ✅' }}
+      tags:
+        - configure
+
+  tags:
+    - configure

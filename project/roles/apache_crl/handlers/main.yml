@@ -1,5 +1,3 @@
-# roles/apache_crl/handlers/main.yml
-
 ---
 
 - name: "restart apache"
@@ -7,6 +5,7 @@
     name: "{{ apache_service_name }}"
     state: restarted
   become: true
+  listen: "restart apache"
   tags:
     - apache_crl
     - handlers
@@ -16,15 +15,7 @@
     name: "{{ apache_service_name }}"
     state: reloaded
   become: true
-  tags:
-    - apache_crl
-    - handlers
-
-- name: "reload firewall"
-  ansible.builtin.systemd:
-    name: firewalld
-    state: reloaded
-  become: true
+  listen: "reload apache"
   tags:
     - apache_crl
     - handlers

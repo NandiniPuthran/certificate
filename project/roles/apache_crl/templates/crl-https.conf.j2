@@ -1,46 +1,46 @@
-# roles/apache_crl/templates/vhost-https.conf.j2
-# HTTPS Virtual Host for CRL - SERVES ONLY, NO CLIENT CERT VALIDATION
+# CRL Publisher HTTPS Configuration
+# Serves CRL on port {{ apache_listen_ssl_port }} (HTTPS only)
+# Coexists with other sites on different ports
 
 <VirtualHost *:{{ apache_listen_ssl_port }}>
     ServerName {{ apache_vhost_name }}
-    ServerAdmin {{ apache_server_admin }}
+    ServerAdmin {{ apache_admin_email }}
     DocumentRoot {{ apache_document_root }}
-    
-    # SSL/TLS Configuration
+
+    # ===== SSL Configuration =====
     SSLEngine on
     SSLProtocol -all +TLSv1.2 +TLSv1.3
-    SSLCipherSuite HIGH:!aNULL:!MD5:!eNULL
+    SSLCipherSuite HIGH:!aNULL:!MD5:!eNULL:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK
+    SSLHonorCipherOrder on
+    
     SSLCertificateFile {{ apache_ssl_cert_file }}
     SSLCertificateKeyFile {{ apache_ssl_key_file }}
-    
-    # IMPORTANT: NO CLIENT CERTIFICATE VALIDATION ON CRL SERVER
-    # Clients validate CRL themselves
-    # This server just serves the file
-    
+
+    # ===== Directory Configuration =====
     <Directory {{ apache_document_root }}>
         Require all granted
         Options Indexes FollowSymLinks
     </Directory>
-    
-    <Directory {{ apache_crl_directory }}>
-        Require all granted
-        Options Indexes
-    </Directory>
-    
-    <Files "*.crl">
+
+    # ===== CRL File Headers =====
+    <FilesMatch "\.crl$">
         Header set Content-Type "application/pkix-crl"
         Header set Content-Disposition "inline"
         Header set Cache-Control "public, max-age=3600"
-    </Files>
-    
-    # Security Headers
+        Header set X-Content-Type-Options "nosniff"
+    </FilesMatch>
+
+    # ===== Security Headers =====
     <IfModule mod_headers.c>
         Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains"
         Header always set X-Content-Type-Options "nosniff"
         Header always set X-Frame-Options "DENY"
+        Header always set X-XSS-Protection "1; mode=block"
     </IfModule>
-    
-    ErrorLog {{ apache_log_dir }}/{{ apache_vhost_name }}-ssl-error.log
-    CustomLog {{ apache_log_dir }}/{{ apache_vhost_name }}-ssl-access.log combined
-    LogLevel {{ apache_log_level }}
+
+    # ===== Logging =====
+    ErrorLog {{ apache_error_log }}
+    CustomLog {{ apache_access_log }} combined
+    LogLevel warn
+
 </VirtualHost>

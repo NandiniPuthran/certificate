@@ -1,0 +1,93 @@
+---
+# Install Apache and required modules
+
+- name: "Detect Apache Installation Status"
+  block:
+    - name: "Check if Apache is already installed"
+      ansible.builtin.command:
+        cmd: "which apache2"
+      become: true
+      register: apache_check
+      failed_when: false
+      changed_when: false
+      tags:
+        - install
+
+    - name: "Set fact: Apache already installed"
+      ansible.builtin.set_fact:
+        apache_already_installed: "{{ apache_check.rc == 0 }}"
+      tags:
+        - install
+
+    - name: "Display Apache Installation Status"
+      ansible.builtin.debug:
+        msg: |
+          Apache Installation Status:
+          - Installed: {{ apache_already_installed }}
+          - Action: {{ 'Add CRL site to existing Apache' if apache_already_installed else 'Install fresh Apache' }}
+      tags:
+        - install
+
+  tags:
+    - install
+
+# ===== Install Apache (if needed) =====
+- name: "Install Apache Package"
+  block:
+    - name: "Install Apache2"
+      ansible.builtin.package:
+        name: "{{ apache_package_name }}"
+        state: present
+      become: true
+      when: not apache_already_installed
+      tags:
+        - install
+
+    - name: "Ensure Apache service is started"
+      ansible.builtin.systemd:
+        name: "{{ apache_service_name }}"
+        state: started
+        enabled: true
+      become: true
+      tags:
+        - install
+
+  tags:
+    - install
+
+# ===== Enable Required Modules =====
+- name: "Enable Apache Modules"
+  block:
+    - name: "Enable SSL module"
+      ansible.builtin.command:
+        cmd: "a2enmod ssl"
+      become: true
+      register: enable_ssl
+      changed_when: "'already enabled' not in enable_ssl.stdout"
+      failed_when: false
+      notify: "restart apache"
+      tags:
+        - install
+
+    - name: "Enable headers module"
+      ansible.builtin.command:
+        cmd: "a2enmod headers"
+      become: true
+      register: enable_headers
+      changed_when: "'already enabled' not in enable_headers.stdout"
+      failed_when: false
+      notify: "restart apache"
+      tags:
+        - install
+
+    - name: "Display Enabled Modules"
+      ansible.builtin.debug:
+        msg: |
+          Apache Modules:
+          - ssl_module: {{ 'enabled ✅' if 'ssl' in enable_ssl.stdout else 'already enabled ✅' }}
+          - headers_module: {{ 'enabled ✅' if 'headers' in enable_headers.stdout else 'already enabled ✅' }}
+      tags:
+        - install
+
+  tags:
+    - install
