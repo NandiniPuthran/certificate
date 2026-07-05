@@ -1,0 +1,19 @@
+[Unit]
+Description=CRL Consumer - Download CRL from Publisher
+After=network-online.target
+Wants=network-online.target
+Documentation=man:curl(1) man:openssl(1)
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/bin/crl-consumer-download.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crl-consumer
+TimeoutStartSec=300
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

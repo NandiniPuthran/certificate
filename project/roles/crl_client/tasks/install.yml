@@ -1,0 +1,69 @@
+---
+# Install dependencies for CRL consumer
+
+- name: "Check Dependencies"
+  block:
+    - name: "Check if curl is installed"
+      ansible.builtin.command:
+        cmd: "which curl"
+      become: true
+      register: curl_check
+      failed_when: false
+      changed_when: false
+      tags:
+        - install
+
+    - name: "Check if openssl is installed"
+      ansible.builtin.command:
+        cmd: "which openssl"
+      become: true
+      register: openssl_check
+      failed_when: false
+      changed_when: false
+      tags:
+        - install
+
+    - name: "Display Dependency Status"
+      ansible.builtin.debug:
+        msg: |
+          Dependencies Status:
+          - curl: {{ 'Present ✅' if curl_check.rc == 0 else 'Installing...' }}
+          - openssl: {{ 'Present ✅' if openssl_check.rc == 0 else 'Installing...' }}
+      tags:
+        - install
+
+  tags:
+    - install
+
+# ===== Install Missing Dependencies =====
+- name: "Install Required Packages"
+  block:
+    - name: "Install curl (if missing)"
+      ansible.builtin.package:
+        name: curl
+        state: present
+      become: true
+      when: curl_check.rc != 0
+      tags:
+        - install
+
+    - name: "Install openssl (if missing)"
+      ansible.builtin.package:
+        name: openssl
+        state: present
+      become: true
+      when: openssl_check.rc != 0
+      tags:
+        - install
+
+    - name: "Display Installation Complete"
+      ansible.builtin.debug:
+        msg: |
+          Dependencies Installed:
+          - curl ✅
+          - openssl ✅
+      tags:
+        - install
+
+  tags:
+    - install

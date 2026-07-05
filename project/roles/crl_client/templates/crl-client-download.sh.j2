@@ -1,0 +1,119 @@
+#!/bin/bash
+# CRL Consumer Download Script
+# Purpose: Download CRL from crl_publisher and validate locally
+# Run: Every 30 minutes via systemd timer
+
+set -euo pipefail
+
+# ===== Configuration =====
+DOWNLOAD_DIR="{{ crl_consumer_download_dir }}"
+CRL_FILE="${DOWNLOAD_DIR}/ca.crl"
+CRL_FILE_TEMP="${DOWNLOAD_DIR}/ca.crl.tmp"
+CRL_FILE_BACKUP="${DOWNLOAD_DIR}/ca.crl.backup"
+CHECKSUM_FILE="${DOWNLOAD_DIR}/.ca.crl.checksum"
+LAST_DOWNLOAD_FILE="${DOWNLOAD_DIR}/.last_download"
+ERROR_FLAG="${DOWNLOAD_DIR}/.download_failed"
+LOG_FILE="{{ crl_consumer_log_file }}"
+
+CRL_SERVER="{{ crl_server_url }}"
+SKIP_SSL="{{ 'true' if crl_consumer_skip_ssl_verification else 'false' }}"
+DOWNLOAD_TIMEOUT="{{ crl_consumer_download_timeout }}"
+MAX_RETRIES="{{ crl_consumer_max_retries }}"
+
+# ===== Logging Function =====
+log_message() {
+    local level=$1
+    shift
+    local message="$@"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+}
+
+# ===== Initialize =====
+mkdir -p "$DOWNLOAD_DIR"
+touch "$LOG_FILE"
+
+log_message "INFO" "Starting CRL download from $CRL_SERVER"
+
+# ===== Step 1: Download CRL =====
+RETRY_COUNT=0
+while [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; do
+    log_message "INFO" "Download attempt $((RETRY_COUNT + 1))/$MAX_RETRIES"
+    
+    if [[ "$SKIP_SSL" == "true" ]]; then
+        CURL_OPTS="-k"
+    else
+        CURL_OPTS=""
+    fi
+    
+    if curl -f -m "$DOWNLOAD_TIMEOUT" $CURL_OPTS -o "$CRL_FILE_TEMP" "$CRL_SERVER" 2>/dev/null; then
+        log_message "INFO" "CRL downloaded successfully"
+        break
+    else
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        if [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; then
+            log_message "WARN" "Download failed, retrying..."
+            sleep 5
+        else
+            log_message "ERROR" "Download failed after $MAX_RETRIES attempts"
+            touch "$ERROR_FLAG"
+            exit 1
+        fi
+    fi
+done
+
+# ===== Step 2: Verify Download =====
+if [[ ! -f "$CRL_FILE_TEMP" ]]; then
+    log_message "ERROR" "CRL temp file not created"
+    touch "$ERROR_FLAG"
+    exit 1
+fi
+
+# ===== Step 3: Calculate Checksum =====
+NEW_CHECKSUM=$(sha256sum "$CRL_FILE_TEMP" | awk '{print $1}')
+log_message "INFO" "New checksum: $NEW_CHECKSUM"
+
+# ===== Step 4: Compare with Previous =====
+if [[ -f "$CHECKSUM_FILE" ]]; then
+    OLD_CHECKSUM=$(cat "$CHECKSUM_FILE")
+    
+    if [[ "$NEW_CHECKSUM" == "$OLD_CHECKSUM" ]]; then
+        log_message "INFO" "CRL content unchanged, skipping processing"
+        rm -f "$CRL_FILE_TEMP"
+        rm -f "$ERROR_FLAG"
+        exit 0
+    fi
+    log_message "INFO" "CRL content changed, processing new version"
+fi
+
+# ===== Step 5: Validate CRL Format =====
+if ! openssl crl -in "$CRL_FILE_TEMP" -text -noout > /dev/null 2>&1; then
+    log_message "ERROR" "Downloaded CRL is invalid or corrupted"
+    touch "$ERROR_FLAG"
+    rm -f "$CRL_FILE_TEMP"
+    exit 1
+fi
+
+log_message "INFO" "CRL validation passed"
+
+# ===== Step 6: Backup Old CRL =====
+if [[ -f "$CRL_FILE" ]]; then
+    cp "$CRL_FILE" "$CRL_FILE_BACKUP"
+    log_message "INFO" "Backed up previous CRL"
+fi
+
+# ===== Step 7: Move New CRL =====
+mv "$CRL_FILE_TEMP" "$CRL_FILE"
+log_message "INFO" "CRL installed successfully"
+
+# ===== Step 8: Update Metadata =====
+echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
+date +%s > "$LAST_DOWNLOAD_FILE"
+rm -f "$ERROR_FLAG"
+
+# ===== Step 9: Set Permissions =====
+chmod 644 "$CRL_FILE"
+chmod 644 "$CRL_FILE_BACKUP" 2>/dev/null || true
+
+log_message "INFO" "CRL download completed successfully"
+exit 0

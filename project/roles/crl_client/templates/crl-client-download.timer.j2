@@ -1,0 +1,14 @@
+[Unit]
+Description=CRL Consumer Timer - Download CRL every 30 minutes
+Documentation=man:curl(1) man:openssl(1)
+
+[Timer]
+# Run every 30 minutes at :00 and :30
+OnCalendar=*-*-* *:00,30:00
+OnBootSec=2min
+AccuracySec=1s
+Persistent=true
+Unit={{ crl_consumer_service_name }}.service
+
+[Install]
+WantedBy=timers.target

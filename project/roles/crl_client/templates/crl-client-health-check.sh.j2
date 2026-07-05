@@ -1,0 +1,119 @@
+#!/bin/bash
+# CRL Consumer Health Check Script
+# Purpose: Validate downloaded CRL is fresh, valid, and has sufficient time remaining
+# Run: Every 1 hour via cron as a safety net
+# Exit codes: 0 = healthy, 1 = warning/failure
+
+set -euo pipefail
+
+# ===== Configuration =====
+DOWNLOAD_DIR="{{ crl_consumer_download_dir }}"
+CRL_FILE="{{ crl_consumer_crl_file }}"
+LAST_DOWNLOAD_FILE="${DOWNLOAD_DIR}/.last_download"
+ERROR_FLAG="${DOWNLOAD_DIR}/.download_failed"
+
+# Safety thresholds
+MAX_AGE_MINUTES="{{ crl_consumer_max_age_minutes }}"          # Alert if not downloaded in X minutes
+MIN_HOURS_REMAINING="{{ crl_consumer_min_hours_remaining }}" # Alert if CRL expires in < X hours
+CRITICAL_HOURS_REMAINING=1.0                                # Critical if CRL expires in < 1 hour
+
+# Exit code tracking
+exit_code=0
+
+# ===== Check 1: Download Has Run Recently =====
+if [[ ! -f "$LAST_DOWNLOAD_FILE" ]]; then
+    echo "CRITICAL: CRL has never been downloaded"
+    exit 1
+fi
+
+LAST_DOWNLOAD_TIME=$(cat "$LAST_DOWNLOAD_FILE")
+CURRENT_TIME=$(date +%s)
+AGE_MINUTES=$(( (CURRENT_TIME - LAST_DOWNLOAD_TIME) / 60 ))
+
+if [[ $AGE_MINUTES -gt $MAX_AGE_MINUTES ]]; then
+    echo "CRITICAL: CRL not downloaded in $AGE_MINUTES minutes (threshold: $MAX_AGE_MINUTES)"
+    echo "Action: Check timer status: systemctl status {{ crl_consumer_timer_name }}.timer"
+    exit 1
+fi
+
+# ===== Check 2: CRL File Exists =====
+if [[ ! -f "$CRL_FILE" ]]; then
+    echo "CRITICAL: CRL file missing at $CRL_FILE"
+    echo "Action: Check download logs: tail -50 {{ crl_consumer_log_file }}"
+    exit 1
+fi
+
+# ===== Check 3: CRL File Is Valid =====
+if ! openssl crl -in "$CRL_FILE" -noout -text > /dev/null 2>&1; then
+    echo "CRITICAL: CRL file is invalid or corrupted"
+    echo "Action: Check download script: /usr/local/bin/crl-consumer-download.sh"
+    exit 1
+fi
+
+# ===== Check 4: Extract CRL Expiry =====
+NEXT_UPDATE=$(openssl crl -in "$CRL_FILE" -noout -text 2>/dev/null | grep "Next Update" | awk -F': ' '{print $2}')
+
+if [[ -z "$NEXT_UPDATE" ]]; then
+    echo "CRITICAL: Cannot read CRL expiry date"
+    echo "Action: Verify CRL file is valid PEM format"
+    exit 1
+fi
+
+# ===== Check 5: Calculate Time Remaining =====
+EXPIRY_EPOCH=$(date -d "$NEXT_UPDATE" +%s)
+CURRENT_EPOCH=$(date +%s)
+SECONDS_LEFT=$((EXPIRY_EPOCH - CURRENT_EPOCH))
+HOURS_LEFT=$((SECONDS_LEFT / 3600))
+MINUTES_LEFT=$((($SECONDS_LEFT % 3600) / 60))
+
+# ===== Check 6: CRL Has Not Expired =====
+if [[ $HOURS_LEFT -lt 0 ]]; then
+    echo "CRITICAL: CRL HAS ALREADY EXPIRED!"
+    echo "Next Update: $NEXT_UPDATE"
+    echo "Action: Immediate manual intervention required"
+    echo "Fix: sudo /usr/local/bin/crl-consumer-download.sh"
+    exit 1
+fi
+
+# ===== Check 7: CRL Not About to Expire (Critical) =====
+if [[ $HOURS_LEFT -lt $CRITICAL_HOURS_REMAINING ]]; then
+    echo "CRITICAL: CRL expires in ${HOURS_LEFT} hours ${MINUTES_LEFT} minutes"
+    echo "Next Update: $NEXT_UPDATE"
+    echo "Action: Monitor closely, may expire before next download"
+    exit_code=1
+fi
+
+# ===== Check 8: CRL Expiring Soon (Warning) =====
+if [[ $HOURS_LEFT -lt $MIN_HOURS_REMAINING ]]; then
+    echo "WARNING: CRL expires in ${HOURS_LEFT} hours ${MINUTES_LEFT} minutes"
+    echo "Next Update: $NEXT_UPDATE"
+    echo "Expected minimum: $MIN_HOURS_REMAINING hours"
+    echo "Recommendation: Verify downloads are running"
+    exit_code=1
+fi
+
+# ===== Check 9: Error Flag Is Not Set =====
+if [[ -f "$ERROR_FLAG" ]]; then
+    echo "WARNING: Download error flag is set - last download failed"
+    echo "Action: Check timer status: systemctl status {{ crl_consumer_timer_name }}.timer"
+    echo "Manual fix: /usr/local/bin/crl-consumer-download.sh"
+    exit_code=1
+fi
+
+# ===== Check 10: CRL File Is Readable =====
+if [[ ! -r "$CRL_FILE" ]]; then
+    echo "CRITICAL: CRL file is not readable"
+    echo "Action: Check file permissions: sudo ls -la $CRL_FILE"
+    exit 1
+fi
+
+# ===== All Checks Passed =====
+if [[ $exit_code -eq 0 ]]; then
+    echo "✅ OK: CRL Consumer Health Check PASSED"
+    echo "   Last download: $AGE_MINUTES minutes ago"
+    echo "   CRL expires: ${HOURS_LEFT} hours ${MINUTES_LEFT} minutes"
+    echo "   Next Update: $NEXT_UPDATE"
+    echo "   Status: Healthy"
+fi
+
+exit $exit_code

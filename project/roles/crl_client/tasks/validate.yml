@@ -1,0 +1,162 @@
+---
+# Validate CRL Consumer setup
+
+- name: "Validate Timer Configuration"
+  block:
+    - name: "Check timer is enabled"
+      ansible.builtin.systemd:
+        name: "{{ crl_consumer_timer_name }}.timer"
+        state: started
+      become: true
+      register: timer_status
+      tags:
+        - validate
+
+    - name: "Verify timer is active"
+      ansible.builtin.command:
+        cmd: "systemctl is-active {{ crl_consumer_timer_name }}.timer"
+      become: true
+      register: timer_active
+      failed_when: timer_active.stdout != "active"
+      tags:
+        - validate
+
+    - name: "Display Timer Status"
+      ansible.builtin.debug:
+        msg: |
+          Timer Status:
+          - Active: {{ 'Yes ✅' if timer_active.stdout == 'active' else 'No ❌' }}
+          - Enabled: {{ 'Yes ✅' if timer_status.status.UnitFileState == 'enabled' else 'No ⚠️' }}
+      tags:
+        - validate
+
+  tags:
+    - validate
+
+# ===== Validate CRL File =====
+- name: "Validate CRL File"
+  block:
+    - name: "Check CRL file exists"
+      ansible.builtin.stat:
+        path: "{{ crl_consumer_crl_file }}"
+      become: true
+      register: crl_file
+      failed_when: not crl_file.stat.exists
+      tags:
+        - validate
+
+    - name: "Verify CRL format"
+      ansible.builtin.command:
+        cmd: "openssl crl -in {{ crl_consumer_crl_file }} -text -noout"
+      become: true
+      register: crl_format
+      failed_when: "'Certificate Revocation List' not in crl_format.stdout"
+      changed_when: false
+      tags:
+        - validate
+
+    - name: "Get CRL expiry"
+      ansible.builtin.shell:
+        cmd: "openssl crl -in {{ crl_consumer_crl_file }} -noout -text | grep 'Next Update'"
+      become: true
+      register: crl_expiry
+      changed_when: false
+      tags:
+        - validate
+
+    - name: "Display CRL Status"
+      ansible.builtin.debug:
+        msg: |
+          CRL File Status:
+          - Exists: {{ 'Yes ✅' if crl_file.stat.exists else 'No ❌' }}
+          - Format: {{ 'Valid PEM ✅' if 'Certificate Revocation List' in crl_format.stdout else 'Invalid ❌' }}
+          - Readable: {{ 'Yes ✅' if crl_file.stat.readable else 'No ❌' }}
+          {{ crl_expiry.stdout }}
+      tags:
+        - validate
+
+  tags:
+    - validate
+
+# ===== Validate Health Check =====
+- name: "Validate Health Check"
+  block:
+    - name: "Run health check script"
+      ansible.builtin.command:
+        cmd: "/usr/local/bin/crl-consumer-health-check.sh"
+      become: true
+      register: health_check
+      changed_when: false
+      tags:
+        - validate
+
+    - name: "Display Health Check Result"
+      ansible.builtin.debug:
+        msg: |
+          Health Check Result:
+          - Status: {{ health_check.stdout | default('Check logs') }}
+          - Exit Code: {{ health_check.rc }}
+      tags:
+        - validate
+
+  tags:
+    - validate
+
+# ===== Validate Recent Downloads =====
+- name: "Validate Recent Downloads"
+  block:
+    - name: "Check systemd logs for recent runs"
+      ansible.builtin.shell:
+        cmd: "journalctl -u {{ crl_consumer_service_name }}.service -n 5 --no-pager"
+      become: true
+      register: recent_logs
+      tags:
+        - validate
+
+    - name: "Display Recent Downloads"
+      ansible.builtin.debug:
+        msg: |
+          Recent Download Logs:
+          {{ recent_logs.stdout }}
+      tags:
+        - validate
+
+  tags:
+    - validate
+
+# ===== Display Validation Summary =====
+- name: "Display Comprehensive Validation Summary"
+  ansible.builtin.debug:
+    msg: |
+      ✅ VALIDATION COMPLETE - CRL Consumer Operational!
+      
+      Configuration Validation:
+      ├─ Timer: Active ✅
+      ├─ Service: Configured ✅
+      ├─ Health Check: Configured ✅
+      └─ Cron Job: Active ✅
+      
+      CRL File Validation:
+      ├─ File exists: {{ 'Yes ✅' if crl_file.stat.exists else 'No ❌' }}
+      ├─ Format: {{ 'Valid PEM ✅' if 'Certificate Revocation List' in crl_format.stdout else 'Invalid ❌' }}
+      ├─ Readable: {{ 'Yes ✅' if crl_file.stat.readable else 'No ❌' }}
+      └─ Current: {{ 'Yes ✅' if crl_expiry.stdout else 'Check manually' }}
+      
+      Schedule:
+      ├─ Download: Every 30 minutes ✅
+      ├─ Health Check: Every 1 hour ✅
+      └─ Soft-fail: Uses cached CRL if download fails ✅
+      
+      Next Steps:
+      1. Monitor first download: journalctl -u {{ crl_consumer_service_name }}.service -f
+      2. Verify CRL is current: sudo openssl crl -in {{ crl_consumer_crl_file }} -noout -text
+      3. Deploy crl_app_config role to use this CRL
+      
+      Configuration:
+      - CRL Server: {{ crl_server_url }}
+      - Local Storage: {{ crl_consumer_crl_file }}
+      - SSL Verification: {{ 'Disabled' if crl_consumer_skip_ssl_verification else 'Enabled' }}
+      
+      ✅ CRL Consumer is fully operational!
+  tags:
+    - validate

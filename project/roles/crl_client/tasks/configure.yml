@@ -1,0 +1,216 @@
+---
+# Configure CRL Consumer
+
+- name: "Create Directories"
+  block:
+    - name: "Create CRL download directory"
+      ansible.builtin.file:
+        path: "{{ crl_consumer_download_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      tags:
+        - configure
+
+    - name: "Create log directory"
+      ansible.builtin.file:
+        path: "{{ crl_consumer_log_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Directory Creation"
+      ansible.builtin.debug:
+        msg: |
+          Directories Created:
+          - CRL: {{ crl_consumer_download_dir }} ✅
+          - Logs: {{ crl_consumer_log_dir }} ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Create Download Script =====
+- name: "Create Download Script"
+  block:
+    - name: "Create crl-consumer-download.sh"
+      ansible.builtin.template:
+        src: crl-consumer-download.sh.j2
+        dest: /usr/local/bin/crl-consumer-download.sh
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Script Creation"
+      ansible.builtin.debug:
+        msg: |
+          Download Script Created:
+          - Path: /usr/local/bin/crl-consumer-download.sh ✅
+          - Permissions: 755 (executable) ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Create Health Check Script =====
+- name: "Create Health Check Script"
+  block:
+    - name: "Create crl-consumer-health-check.sh"
+      ansible.builtin.template:
+        src: crl-consumer-health-check.sh.j2
+        dest: /usr/local/bin/crl-consumer-health-check.sh
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Health Check Creation"
+      ansible.builtin.debug:
+        msg: |
+          Health Check Script Created:
+          - Path: /usr/local/bin/crl-consumer-health-check.sh ✅
+          - Permissions: 755 (executable) ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Create Systemd Service and Timer =====
+- name: "Create Systemd Files"
+  block:
+    - name: "Create systemd service file"
+      ansible.builtin.template:
+        src: crl-consumer-download.service.j2
+        dest: "/etc/systemd/system/{{ crl_consumer_service_name }}.service"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      notify: "reload crl-consumer"
+      tags:
+        - configure
+
+    - name: "Create systemd timer file"
+      ansible.builtin.template:
+        src: crl-consumer-download.timer.j2
+        dest: "/etc/systemd/system/{{ crl_consumer_timer_name }}.timer"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      notify: "reload crl-consumer"
+      tags:
+        - configure
+
+    - name: "Reload systemd daemon"
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Systemd Files Creation"
+      ansible.builtin.debug:
+        msg: |
+          Systemd Files Created:
+          - Service: /etc/systemd/system/{{ crl_consumer_service_name }}.service ✅
+          - Timer: /etc/systemd/system/{{ crl_consumer_timer_name }}.timer ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Setup Health Check Cron =====
+- name: "Setup Health Check Cron"
+  block:
+    - name: "Create health check cron job (every 1 hour)"
+      ansible.builtin.cron:
+        name: "CRL Consumer Health Check"
+        minute: "0"
+        hour: "*"
+        job: "/usr/local/bin/crl-consumer-health-check.sh > /dev/null 2>&1"
+        state: present
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Cron Job Creation"
+      ansible.builtin.debug:
+        msg: |
+          Cron Job Created:
+          - Health Check: Every 1 hour at :00 ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Enable and Start Timer =====
+- name: "Enable and Start Timer"
+  block:
+    - name: "Enable timer"
+      ansible.builtin.systemd:
+        name: "{{ crl_consumer_timer_name }}.timer"
+        enabled: true
+      become: true
+      tags:
+        - configure
+
+    - name: "Start timer"
+      ansible.builtin.systemd:
+        name: "{{ crl_consumer_timer_name }}.timer"
+        state: started
+      become: true
+      tags:
+        - configure
+
+    - name: "Display Timer Status"
+      ansible.builtin.debug:
+        msg: |
+          Timer Status:
+          - Enabled: Yes ✅
+          - State: Running ✅
+          - Schedule: Every 30 minutes ✅
+      tags:
+        - configure
+
+  tags:
+    - configure
+
+# ===== Trigger Initial Download =====
+- name: "Trigger Initial CRL Download"
+  block:
+    - name: "Run download script manually (first time)"
+      ansible.builtin.command:
+        cmd: "/usr/local/bin/crl-consumer-download.sh"
+      become: true
+      register: initial_download
+      tags:
+        - configure
+
+    - name: "Display Initial Download Result"
+      ansible.builtin.debug:
+        msg: |
+          Initial Download:
+          - Status: {{ 'Success ✅' if initial_download.rc == 0 else 'Check logs' }}
+          - Exit Code: {{ initial_download.rc }}
+      tags:
+        - configure
+
+  tags:
+    - configure
