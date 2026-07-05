@@ -1,0 +1,95 @@
+---
+# Configure Apache to validate client certificates with CRL
+# Uses lineinfile to modify EXISTING Apache config
+
+- name: "Configure Apache CRL Validation"
+  block:
+
+    - name: "Check if Apache is installed"
+      ansible.builtin.command:
+        cmd: "which apache2"
+      become: true
+      register: apache_check
+      failed_when: false
+      changed_when: false
+      tags:
+        - apache
+
+    - name: "Display Apache Status"
+      ansible.builtin.debug:
+        msg: |
+          Apache Status:
+          - Installed: {{ 'Yes ✅' if apache_check.rc == 0 else 'No (skipping)' }}
+      tags:
+        - apache
+
+    - name: "Backup existing Apache SSL config"
+      ansible.builtin.shell:
+        cmd: "find /etc/apache2/sites-enabled -name '*.conf' | xargs grep -l 'SSLEngine on' | head -1"
+      become: true
+      register: apache_ssl_config
+      failed_when: false
+      changed_when: false
+      tags:
+        - apache
+
+    - name: "Create backup of existing Apache config"
+      ansible.builtin.copy:
+        src: "{{ apache_ssl_config.stdout }}"
+        dest: "{{ backup_dir }}/{{ apache_ssl_config.stdout | basename }}.backup"
+        remote_src: true
+      become: true
+      when: apache_check.rc == 0 and apache_ssl_config.stdout != ""
+      tags:
+        - apache
+
+    - name: "Add CRL validation directives to Apache config"
+      ansible.builtin.lineinfile:
+        path: "{{ apache_ssl_config.stdout }}"
+        line: "    SSLCARevocationFile {{ crl_file }}"
+        insertafter: "^\s*SSLCertificateKeyFile"
+        state: present
+      become: true
+      when: apache_check.rc == 0 and apache_ssl_config.stdout != ""
+      tags:
+        - apache
+
+    - name: "Add SSLCARevocationCheck directive"
+      ansible.builtin.lineinfile:
+        path: "{{ apache_ssl_config.stdout }}"
+        line: "    SSLCARevocationCheck chain"
+        insertafter: "SSLCARevocationFile"
+        state: present
+      become: true
+      when: apache_check.rc == 0 and apache_ssl_config.stdout != ""
+      notify: "restart apache"
+      tags:
+        - apache
+
+    - name: "Test Apache configuration"
+      ansible.builtin.command:
+        cmd: "apache2ctl configtest"
+      become: true
+      when: apache_check.rc == 0
+      register: apache_test
+      failed_when: "'Syntax OK' not in (apache_test.stdout + apache_test.stderr)"
+      tags:
+        - apache
+
+    - name: "Display Apache Configuration Status"
+      ansible.builtin.debug:
+        msg: |
+          Apache CRL Configuration:
+          - Config File: {{ apache_ssl_config.stdout }}
+          - CRL File: {{ crl_file }} ✅
+          - Directives Added:
+            ├─ SSLCARevocationFile: {{ crl_file }}
+            └─ SSLCARevocationCheck: chain
+          - Backup: {{ backup_dir }}/{{ apache_ssl_config.stdout | basename }}.backup ✅
+          - Syntax Check: OK ✅
+      tags:
+        - apache
+
+  tags:
+    - crl_app_config
+    - apache

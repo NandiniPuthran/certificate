@@ -1,40 +1,95 @@
-# roles/application_crl/tasks/freeradius.yml
-# Configure FreeRADIUS for EAP-TLS with CRL
-
 ---
+# Configure FreeRADIUS to validate client certificates with CRL
+# Uses lineinfile to modify EXISTING eap.conf
 
-- name: "Configure FreeRADIUS EAP-TLS CRL"
+- name: "Configure FreeRADIUS CRL Validation"
   block:
-    - name: "Add CRL to radiusd.conf"
-      ansible.builtin.lineinfile:
-        path: "{{ freeradius_config_dir }}/radiusd.conf"
-        line: "  crl_file = {{ freeradius_crl_file }}"
-        state: present
-        insertafter: "^  certificates {"
+
+    - name: "Check if FreeRADIUS is installed"
+      ansible.builtin.command:
+        cmd: "which radiusd"
       become: true
+      register: freeradius_check
+      failed_when: false
+      changed_when: false
+      tags:
+        - freeradius
+
+    - name: "Display FreeRADIUS Status"
+      ansible.builtin.debug:
+        msg: |
+          FreeRADIUS Status:
+          - Installed: {{ 'Yes ✅' if freeradius_check.rc == 0 else 'No (skipping)' }}
+      tags:
+        - freeradius
+
+    - name: "Backup existing eap.conf"
+      ansible.builtin.copy:
+        src: "{{ freeradius_eap_config }}"
+        dest: "{{ backup_dir }}/eap.conf.backup"
+        remote_src: true
+      become: true
+      when: freeradius_check.rc == 0
+      tags:
+        - freeradius
+
+    - name: "Find tls-config tls-common section"
+      ansible.builtin.shell:
+        cmd: "grep -n 'tls-config tls-common' {{ freeradius_eap_config }} | head -1 | cut -d: -f1"
+      become: true
+      when: freeradius_check.rc == 0
+      register: freeradius_tls_section
+      failed_when: false
+      tags:
+        - freeradius
+
+    - name: "Add crl_file directive to eap.conf"
+      ansible.builtin.lineinfile:
+        path: "{{ freeradius_eap_config }}"
+        line: "\t\t\tcrl_file = {{ crl_file }}"
+        insertafter: "^\t\ttls-config tls-common"
+        state: present
+      become: true
+      when: freeradius_check.rc == 0
+      tags:
+        - freeradius
+
+    - name: "Add check_crl directive to eap.conf"
+      ansible.builtin.lineinfile:
+        path: "{{ freeradius_eap_config }}"
+        line: "\t\t\tcheck_crl = yes"
+        insertafter: "crl_file = "
+        state: present
+      become: true
+      when: freeradius_check.rc == 0
       notify: "restart freeradius"
       tags:
-        - application_crl
         - freeradius
 
-    - name: "Log FreeRADIUS CRL configuration"
-      ansible.builtin.lineinfile:
-        path: "{{ application_crl_log_file }}"
-        line: "[{{ ansible_date_time.iso8601 }}] FreeRADIUS EAP-TLS CRL: {{ freeradius_crl_file }} (soft-fail)"
-        create: true
+    - name: "Test FreeRADIUS configuration"
+      ansible.builtin.command:
+        cmd: "radiusd -C"
       become: true
+      when: freeradius_check.rc == 0
+      register: freeradius_test
+      failed_when: freeradius_test.rc != 0
       tags:
-        - application_crl
         - freeradius
 
-    - name: "Display FreeRADIUS CRL configuration"
+    - name: "Display FreeRADIUS Configuration Status"
       ansible.builtin.debug:
-        msg: "✅ FreeRADIUS EAP-TLS configured with CRL soft-fail strategy"
+        msg: |
+          FreeRADIUS CRL Configuration:
+          - Config File: {{ freeradius_eap_config }} (MODIFIED)
+          - CRL File: {{ crl_file }} ✅
+          - Directives Added:
+            ├─ crl_file = {{ crl_file }}
+            └─ check_crl = yes
+          - Backup: {{ backup_dir }}/eap.conf.backup ✅
+          - Syntax Check: OK ✅
       tags:
-        - application_crl
         - freeradius
-        - debug
 
   tags:
-    - application_crl
+    - crl_app_config
     - freeradius

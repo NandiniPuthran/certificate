@@ -1,38 +1,97 @@
-# roles/application_crl/tasks/rsyslog.yml
-# Configure rsyslog with ossl driver and CRL
-
 ---
+# Configure rsyslog to use CRL for TLS connections
+# Uses lineinfile to modify EXISTING rsyslog config
 
-- name: "Configure rsyslog with ossl driver and CRL"
+- name: "Configure rsyslog CRL Validation"
   block:
-    - name: "Create rsyslog ossl driver config"
-      ansible.builtin.copy:
-        content: |
-          module(load="ossl")
-          global(
-            DefaultNetstreamDriver="ossl"
-            DefaultNetstreamDriverCertFile="{{ rsyslog_crl_file }}"
-          )
-        dest: "{{ rsyslog_config_dir }}/50-crl-ossl.conf"
-        owner: root
-        group: root
-        mode: '0644'
+
+    - name: "Check if rsyslog is installed"
+      ansible.builtin.command:
+        cmd: "which rsyslogd"
       become: true
-      notify: "restart rsyslog"
+      register: rsyslog_check
+      failed_when: false
+      changed_when: false
       tags:
-        - application_crl
         - rsyslog
 
-    - name: "Log rsyslog CRL configuration"
-      ansible.builtin.lineinfile:
-        path: "{{ application_crl_log_file }}"
-        line: "[{{ ansible_date_time.iso8601 }}] rsyslog ossl driver CRL: {{ rsyslog_crl_file }} (soft-fail)"
-        create: true
-      become: true
+    - name: "Display rsyslog Status"
+      ansible.builtin.debug:
+        msg: |
+          rsyslog Status:
+          - Installed: {{ 'Yes ✅' if rsyslog_check.rc == 0 else 'No (skipping)' }}
       tags:
-        - application_crl
+        - rsyslog
+
+    - name: "Check current rsyslog driver"
+      ansible.builtin.shell:
+        cmd: "grep -i 'DefaultNetstreamDriver' /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null | grep -v '^#' | head -1"
+      become: true
+      when: rsyslog_check.rc == 0
+      register: rsyslog_driver_check
+      failed_when: false
+      changed_when: false
+      tags:
+        - rsyslog
+
+    - name: "Backup existing rsyslog config"
+      ansible.builtin.copy:
+        src: "/etc/rsyslog.conf"
+        dest: "{{ backup_dir }}/rsyslog.conf.backup"
+        remote_src: true
+      become: true
+      when: rsyslog_check.rc == 0
+      tags:
+        - rsyslog
+
+    - name: "Ensure ossl driver is set (required for CRL)"
+      ansible.builtin.lineinfile:
+        path: "/etc/rsyslog.conf"
+        line: "$DefaultNetstreamDriver ossl"
+        insertafter: "^#.*DefaultNetstreamDriver"
+        state: present
+      become: true
+      when: rsyslog_check.rc == 0
+      tags:
+        - rsyslog
+
+    - name: "Add CRL file to rsyslog TLS config"
+      ansible.builtin.lineinfile:
+        path: "/etc/rsyslog.conf"
+        line: "$DefaultNetstreamDriverCRLFile {{ crl_file }}"
+        insertafter: "^\$DefaultNetstreamDriver"
+        state: present
+      become: true
+      when: rsyslog_check.rc == 0
+      notify: "restart rsyslog"
+      tags:
+        - rsyslog
+
+    - name: "Test rsyslog configuration"
+      ansible.builtin.command:
+        cmd: "rsyslogd -N 1 -f /etc/rsyslog.conf"
+      become: true
+      when: rsyslog_check.rc == 0
+      register: rsyslog_test
+      failed_when: rsyslog_test.rc != 0
+      tags:
+        - rsyslog
+
+    - name: "Display rsyslog Configuration Status"
+      ansible.builtin.debug:
+        msg: |
+          rsyslog CRL Configuration:
+          - Config File: /etc/rsyslog.conf (MODIFIED)
+          - CRL File: {{ crl_file }} ✅
+          - Driver: ossl (CRL support) ✅
+          - Directives Added:
+            ├─ $DefaultNetstreamDriver: ossl
+            └─ $DefaultNetstreamDriverCRLFile: {{ crl_file }}
+          - Backup: {{ backup_dir }}/rsyslog.conf.backup ✅
+          - Syntax Check: OK ✅
+      tags:
         - rsyslog
 
   tags:
-    - application_crl
+    - crl_app_config
     - rsyslog

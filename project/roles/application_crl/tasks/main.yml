@@ -1,85 +1,117 @@
-# roles/application_crl/tasks/main.yml
-# Configure applications to use CRL with SOFT-FAIL strategy
-
 ---
 
-- name: "Create log directory"
-  ansible.builtin.file:
-    path: "{{ application_crl_log_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: '0755'
-  become: true
-  tags:
-    - application_crl
-    - setup
+# Main orchestrator - configures applications to use CRL
 
-- name: "Verify CRL file exists"
-  ansible.builtin.stat:
-    path: "{{ application_crl_file_path }}"
-  register: crl_file_stat
-  failed_when: not crl_file_stat.stat.exists
-  tags:
-    - application_crl
-    - validation
+- name: "Configure Applications to Use CRL"
+  block:
 
-- name: "Configure Apache mod_ssl with soft-fail CRL checking"
-  ansible.builtin.include_tasks: apache-ssl.yml
-  when: application_crl_type == 'apache' or application_crl_type == 'all'
-  tags:
-    - application_crl
-    - apache
+    # ===== PHASE 1: VALIDATE CRL EXISTS =====
+    - name: "Verify CRL file exists"
+      ansible.builtin.stat:
+        path: "{{ crl_file }}"
+      become: true
+      register: crl_stat
+      failed_when: not crl_stat.stat.exists
+      tags:
+        - crl_app_config
 
-- name: "Configure HAProxy with CRL validation"
-  ansible.builtin.include_tasks: haproxy.yml
-  when: application_crl_type == 'haproxy' or application_crl_type == 'all'
-  tags:
-    - application_crl
-    - haproxy
+    - name: "Display CRL Status"
+      ansible.builtin.debug:
+        msg: |
+          CRL File Status:
+          - Path: {{ crl_file }}
+          - Exists: {{ 'Yes ✅' if crl_stat.stat.exists else 'No ❌' }}
+          - Size: {{ crl_stat.stat.size }} bytes
+          - Readable: {{ 'Yes ✅' if crl_stat.stat.readable else 'No ❌' }}
+      tags:
+        - crl_app_config
 
-- name: "Configure SSSD with LDAP CRL checking"
-  ansible.builtin.include_tasks: sssd.yml
-  when: application_crl_type == 'sssd' or application_crl_type == 'all'
-  tags:
-    - application_crl
-    - sssd
+    # ===== PHASE 2: CREATE BACKUP DIRECTORY =====
+    - name: "Create backup directory"
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      when: backup_configs
+      tags:
+        - crl_app_config
 
-- name: "Configure rsyslog with ossl driver and CRL"
-  ansible.builtin.include_tasks: rsyslog.yml
-  when: application_crl_type == 'rsyslog' or application_crl_type == 'all'
-  tags:
-    - application_crl
-    - rsyslog
+    # ===== PHASE 3: CONFIGURE APPLICATIONS =====
+    - name: "Configure Apache to Use CRL"
+      ansible.builtin.include_tasks: apache.yml
+      when: configure_apache
+      tags:
+        - crl_app_config
+        - apache
 
-- name: "Configure etcd with CRL checking"
-  ansible.builtin.include_tasks: etcd.yml
-  when: application_crl_type == 'etcd' or application_crl_type == 'all'
-  tags:
-    - application_crl
-    - etcd
+    - name: "Configure HAProxy to Use CRL"
+      ansible.builtin.include_tasks: haproxy.yml
+      when: configure_haproxy
+      tags:
+        - crl_app_config
+        - haproxy
 
-- name: "Configure FreeRADIUS for EAP-TLS with CRL"
-  ansible.builtin.include_tasks: freeradius.yml
-  when: application_crl_type == 'freeradius' or application_crl_type == 'all'
-  tags:
-    - application_crl
-    - freeradius
+    - name: "Configure rsyslog to Use CRL"
+      ansible.builtin.include_tasks: rsyslog.yml
+      when: configure_rsyslog
+      tags:
+        - crl_app_config
+        - rsyslog
 
-- name: "Display application CRL configuration summary"
+    - name: "Configure etcd to Use CRL"
+      ansible.builtin.include_tasks: etcd.yml
+      when: configure_etcd
+      tags:
+        - crl_app_config
+        - etcd
+
+    - name: "Configure FreeRADIUS to Use CRL"
+      ansible.builtin.include_tasks: freeradius.yml
+      when: configure_freeradius
+      tags:
+        - crl_app_config
+        - freeradius
+
+    # ===== PHASE 4: VALIDATE CONFIGURATION =====
+    - name: "Validate Application Configurations"
+      ansible.builtin.include_tasks: validate.yml
+      when: validate_configuration
+      tags:
+        - crl_app_config
+        - validate
+
+  tags:
+    - crl_app_config
+
+# ===== Display Summary =====
+- name: "Display Configuration Summary"
   ansible.builtin.debug:
     msg: |
-      ✅ Application CRL Configuration Complete
-      - CRL File: {{ application_crl_file_path }}
-      - Soft-Fail Strategy: Enabled
-      - Application Type(s): {{ application_crl_type }}
-      - Logs: {{ application_crl_log_file }}
+      ✅ Application CRL Configuration Complete!
       
-      SOFT-FAIL Behavior:
-      - ✅ Revoked certs still checked and rejected
-      - ✅ Expired/missing CRL doesn't break service
-      - ⚠️ Admin alerted on CRL age/validity issues
-      - 📋 Applications continue with best-effort validation
+      Configured Applications:
+      - Apache: {{ 'Yes ✅' if configure_apache else 'No' }}
+      - HAProxy: {{ 'Yes ✅' if configure_haproxy else 'No' }}
+      - rsyslog: {{ 'Yes ✅' if configure_rsyslog else 'No' }}
+      - etcd: {{ 'Yes ✅' if configure_etcd else 'No' }}
+      - FreeRADIUS: {{ 'Yes ✅' if configure_freeradius else 'No' }}
+      
+      CRL Location: {{ crl_file }}
+      Backup Location: {{ backup_dir }}
+      
+      Next Steps:
+      1. Verify applications are using CRL
+      2. Test certificate validation
+      3. Monitor application logs
+      
+      Verification Commands:
+      - Apache: sudo apache2ctl -S
+      - HAProxy: sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+      - rsyslog: sudo rsyslogd -N 1
+      - etcd: sudo etcdctl member list (with client certs)
+      - FreeRADIUS: sudo radiusd -X (debug mode)
   tags:
-    - application_crl
-    - debug
+    - crl_app_config

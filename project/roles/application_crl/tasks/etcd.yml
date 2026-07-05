@@ -1,40 +1,85 @@
-# roles/application_crl/tasks/etcd.yml
-# Configure etcd with CRL validation
-
 ---
+# Configure etcd to validate client certificates with CRL
+# Uses lineinfile to modify EXISTING etcd config
 
-- name: "Configure etcd CRL"
+- name: "Configure etcd CRL Validation"
   block:
-    - name: "Add CRL to etcd configuration"
+
+    - name: "Check if etcd is installed"
+      ansible.builtin.command:
+        cmd: "which etcd"
+      become: true
+      register: etcd_check
+      failed_when: false
+      changed_when: false
+      tags:
+        - etcd
+
+    - name: "Display etcd Status"
+      ansible.builtin.debug:
+        msg: |
+          etcd Status:
+          - Installed: {{ 'Yes ✅' if etcd_check.rc == 0 else 'No (skipping)' }}
+      tags:
+        - etcd
+
+    - name: "Backup existing etcd config"
+      ansible.builtin.copy:
+        src: "{{ etcd_config_file }}"
+        dest: "{{ backup_dir }}/etcd.conf.yml.backup"
+        remote_src: true
+      become: true
+      when: etcd_check.rc == 0
+      tags:
+        - etcd
+
+    - name: "Add client-crl-file to etcd config"
       ansible.builtin.lineinfile:
         path: "{{ etcd_config_file }}"
-        line: "  client-crl-file: {{ etcd_crl_file }}"
+        line: "client-crl-file: {{ crl_file }}"
+        insertafter: "^#?client-cert-auth:"
         state: present
-        insertafter: "^security:"
       become: true
+      when: etcd_check.rc == 0
+      tags:
+        - etcd
+
+    - name: "Add peer-crl-file to etcd config"
+      ansible.builtin.lineinfile:
+        path: "{{ etcd_config_file }}"
+        line: "peer-crl-file: {{ crl_file }}"
+        insertafter: "^#?peer-client-cert-auth:"
+        state: present
+      become: true
+      when: etcd_check.rc == 0
       notify: "restart etcd"
       tags:
-        - application_crl
         - etcd
 
-    - name: "Log etcd CRL configuration"
-      ansible.builtin.lineinfile:
-        path: "{{ application_crl_log_file }}"
-        line: "[{{ ansible_date_time.iso8601 }}] etcd CRL configured: {{ etcd_crl_file }} (soft-fail)"
-        create: true
+    - name: "Verify etcd configuration"
+      ansible.builtin.command:
+        cmd: "grep -E 'client-crl-file|peer-crl-file' {{ etcd_config_file }}"
       become: true
+      when: etcd_check.rc == 0
+      register: etcd_verify
+      failed_when: etcd_verify.rc != 0
       tags:
-        - application_crl
         - etcd
 
-    - name: "Display etcd CRL configuration"
+    - name: "Display etcd Configuration Status"
       ansible.builtin.debug:
-        msg: "✅ etcd CRL configured with soft-fail strategy"
+        msg: |
+          etcd CRL Configuration:
+          - Config File: {{ etcd_config_file }} (MODIFIED)
+          - CRL File: {{ crl_file }} ✅
+          - Directives Added:
+            ├─ client-crl-file: {{ crl_file }}
+            └─ peer-crl-file: {{ crl_file }}
+          - Backup: {{ backup_dir }}/etcd.conf.yml.backup ✅
+          - Verification: OK ✅
       tags:
-        - application_crl
         - etcd
-        - debug
 
   tags:
-    - application_crl
+    - crl_app_config
     - etcd
