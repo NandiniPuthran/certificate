@@ -1,0 +1,68 @@
+---
+# Runs once per outlet (outlet var injected via include_tasks loop in main.yml).
+# Because pdus group hosts use ansible_connection: local (see group_vars/pdus.yml),
+# these tasks already execute on the controller — no delegate_to needed. The
+# PDU's address is inventory_hostname / ansible_host, same as any other host.
+
+- name: Set outlet API base URL
+  ansible.builtin.set_fact:
+    outlet_settings_url: >-
+      {{ pdu_api_scheme }}://{{ ansible_host | default(inventory_hostname) }}/rest/mbdetnrs/{{ pdu_api_version }}/powerDistributions/1/outlets/{{ outlet.outlet_id }}/settings
+
+# --------------------------------------------------------------------------
+# Optional: fetch current settings first so we can skip the write when the
+# outlet is already in the desired state (idempotency / less noisy runs).
+# TODO: confirm the GET response shape matches what we assume below —
+# adjust the `when` comparison field names to match reality.
+# --------------------------------------------------------------------------
+- name: Get current outlet settings
+  ansible.builtin.uri:
+    url: "{{ outlet_settings_url }}"
+    method: GET
+    # TODO: replace with whatever auth your other pdu role uses, e.g.:
+    # url_username: "{{ pdu_api_user }}"
+    # url_password: "{{ pdu_api_password }}"
+    # headers:
+    #   Authorization: "Bearer {{ pdu_api_token }}"
+    validate_certs: "{{ pdu_api_validate_certs }}"
+    timeout: "{{ pdu_api_timeout }}"
+    status_code: [200]
+  register: current_settings
+  when: pdu_check_before_write | bool
+
+- name: Determine if update is needed
+  ansible.builtin.set_fact:
+    outlet_needs_update: >-
+      {{
+        (not pdu_check_before_write) or
+        (current_settings.json.startupState | default('') != outlet.startup_state) or
+        (current_settings.json.powerOnDelay | default(-1) | int != outlet.delay | int)
+      }}
+
+# --------------------------------------------------------------------------
+# Write desired settings
+# TODO: confirm HTTP verb (PATCH vs PUT) and exact JSON field names against
+# the real API docs / your existing pdu role's payload.
+# --------------------------------------------------------------------------
+- name: Apply startup settings to outlet
+  ansible.builtin.uri:
+    url: "{{ outlet_settings_url }}"
+    method: PATCH
+    body_format: json
+    body:
+      startupState: "{{ outlet.startup_state }}"   # TODO: confirm field name
+      powerOnDelay: "{{ outlet.delay | int }}"      # TODO: confirm field name
+    # TODO: same auth block as the GET task above
+    validate_certs: "{{ pdu_api_validate_certs }}"
+    timeout: "{{ pdu_api_timeout }}"
+    status_code: [200, 204]
+  when: outlet_needs_update | bool
+  register: outlet_apply_result
+
+- name: Report outcome for this outlet
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} outlet {{ outlet.outlet_id }}
+      ({{ outlet.hostname if outlet.hostname else 'unused' }}):
+      {{ 'updated' if outlet_needs_update else 'already correct, skipped' }}
+      -> state={{ outlet.startup_state }}, delay={{ outlet.delay }}

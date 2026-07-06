@@ -1,0 +1,88 @@
+---
+# This role is intended to run against the "pdus" inventory group.
+# Each PDU host defines pdu_outlet_count in its own host_vars.
+# Any host anywhere in inventory can "claim" an outlet on a given PDU by
+# setting pdu_host / pdu_outlet_id / pdu_startup_delay in its own host_vars.
+
+# ==========================================================================
+# 1. SAFETY GATE
+# ==========================================================================
+- name: Abort unless explicitly confirmed
+  ansible.builtin.assert:
+    that:
+      - pdu_apply_confirm | bool
+    fail_msg: >-
+      Refusing to modify PDU outlet startup settings without
+      pdu_apply_confirm=true. Re-run with -e pdu_apply_confirm=true
+      once you've reviewed the plan.
+
+- name: Ensure this PDU defines its outlet count
+  ansible.builtin.assert:
+    that:
+      - pdu_outlet_count is defined
+      - pdu_outlet_count | int > 0
+    fail_msg: >-
+      {{ inventory_hostname }} has no pdu_outlet_count defined in its
+      host_vars — the role doesn't know how many outlets to reconcile.
+
+# ==========================================================================
+# 2. FIND WHO CLAIMS OUTLETS ON *THIS* PDU
+# ==========================================================================
+# Scans every other host in inventory for pdu_host == this PDU, and pulls
+# out their claimed outlet_id / delay. This replaces the old CSV join.
+- name: Collect active outlet claims for this PDU
+  ansible.builtin.set_fact:
+    pdu_active_claims: "{{ pdu_active_claims | default([]) + [claim] }}"
+  vars:
+    claim:
+      outlet_id: "{{ hostvars[claim_host].pdu_outlet_id }}"
+      hostname: "{{ claim_host }}"
+      delay: "{{ hostvars[claim_host].pdu_startup_delay }}"
+  loop: "{{ groups['all'] }}"
+  loop_control:
+    loop_var: claim_host
+  when:
+    - hostvars[claim_host].pdu_host is defined
+    - hostvars[claim_host].pdu_host == inventory_hostname
+    - hostvars[claim_host].pdu_outlet_id is defined
+
+- name: Fail on duplicate outlet claims (two hosts claiming the same outlet)
+  ansible.builtin.assert:
+    that:
+      - (pdu_active_claims | default([]) | map(attribute='outlet_id') | list | unique | length)
+        == (pdu_active_claims | default([]) | map(attribute='outlet_id') | list | length)
+    fail_msg: >-
+      Two or more hosts claim the same outlet_id on {{ inventory_hostname }}.
+      Check host_vars for duplicate pdu_outlet_id values against this pdu_host.
+
+# ==========================================================================
+# 3. BUILD FULL OUTLET LIST (1..pdu_outlet_count), FILLING GAPS AS "UNUSED"
+# ==========================================================================
+- name: Build normalized outlet settings for every outlet on this PDU
+  ansible.builtin.set_fact:
+    pdu_outlet_settings: "{{ pdu_outlet_settings | default([]) + [entry] }}"
+  vars:
+    claim: "{{ pdu_active_claims | default([]) | selectattr('outlet_id', 'equalto', outlet_num) | list | first | default(None) }}"
+    is_active: "{{ claim is not none }}"
+    entry:
+      outlet_id: "{{ outlet_num }}"
+      hostname: "{{ claim.hostname if is_active else '' }}"
+      startup_state: "{{ pdu_active_startup_state if is_active else pdu_unused_startup_state }}"
+      delay: "{{ claim.delay if is_active else pdu_unused_delay }}"
+  loop: "{{ range(1, (pdu_outlet_count | int) + 1) | list }}"
+  loop_control:
+    loop_var: outlet_num
+
+- name: Show planned changes (dry-run visibility)
+  ansible.builtin.debug:
+    var: pdu_outlet_settings
+
+# ==========================================================================
+# 4. APPLY TO EACH OUTLET
+# ==========================================================================
+- name: Configure startup state for each outlet
+  ansible.builtin.include_tasks: configure_outlet.yml
+  loop: "{{ pdu_outlet_settings }}"
+  loop_control:
+    loop_var: outlet
+    label: "{{ inventory_hostname }} outlet {{ outlet.outlet_id }} ({{ outlet.hostname | default('unused') }})"
