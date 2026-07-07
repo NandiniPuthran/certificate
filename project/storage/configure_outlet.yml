@@ -1,68 +1,117 @@
 ---
-# Runs once per outlet (outlet var injected via include_tasks loop in main.yml).
-# Because pdus group hosts use ansible_connection: local (see group_vars/pdus.yml),
-# these tasks already execute on the controller — no delegate_to needed. The
-# PDU's address is inventory_hostname / ansible_host, same as any other host.
+# Runs against the "pdus" inventory group. Each PDU's host_vars define:
+#   pdu_outlet_count: 42
+#   outlet: [{id, name, delay}, ...]   <- your existing var, unchanged
+# Any outlet id in 1..pdu_outlet_count NOT present in `outlet` is treated
+# as unused: name left alone, delay/state forced to the unused defaults.
 
-- name: Set outlet API base URL
+# ==========================================================================
+# 1. SAFETY GATE
+# ==========================================================================
+- name: Abort unless explicitly confirmed
+  ansible.builtin.assert:
+    that:
+      - pdu_apply_confirm | bool
+    fail_msg: >-
+      Refusing to modify PDU outlet startup settings without
+      pdu_apply_confirm=true. Re-run with -e pdu_apply_confirm=true
+      once you've reviewed the plan.
+
+- name: Ensure this PDU defines its outlet count
+  ansible.builtin.assert:
+    that:
+      - pdu_outlet_count is defined
+      - pdu_outlet_count | int > 0
+    fail_msg: >-
+      {{ inventory_hostname }} has no pdu_outlet_count defined in its
+      host_vars — the role doesn't know how many outlets to reconcile.
+
+# ==========================================================================
+# 2. BUILD FULL OUTLET LIST (1..pdu_outlet_count), COMPUTING state
+# ==========================================================================
+# Split into three small steps instead of one task doing everything, so
+# each step is easy to read/debug on its own.
+
+# Step 2a: turn `outlet` (list) into a dict keyed by id, so later lookups
+# are a simple key check instead of a search through the list each time.
+- name: Build a lookup of configured outlets by id
   ansible.builtin.set_fact:
-    outlet_settings_url: >-
-      {{ pdu_api_scheme }}://{{ ansible_host | default(inventory_hostname) }}/rest/mbdetnrs/{{ pdu_api_version }}/powerDistributions/1/outlets/{{ outlet.outlet_id }}/settings
+    pdu_outlet_by_id: "{{ dict(outlet | default([]) | map(attribute='id') | zip(outlet | default([]))) }}"
 
-# --------------------------------------------------------------------------
-# Optional: fetch current settings first so we can skip the write when the
-# outlet is already in the desired state (idempotency / less noisy runs).
-# TODO: confirm the GET response shape matches what we assume below —
-# adjust the `when` comparison field names to match reality.
-# --------------------------------------------------------------------------
-- name: Get current outlet settings
-  ansible.builtin.uri:
-    url: "{{ outlet_settings_url }}"
-    method: GET
-    # TODO: replace with whatever auth your other pdu role uses, e.g.:
-    # url_username: "{{ pdu_api_user }}"
-    # url_password: "{{ pdu_api_password }}"
-    # headers:
-    #   Authorization: "Bearer {{ pdu_api_token }}"
-    validate_certs: "{{ pdu_api_validate_certs }}"
-    timeout: "{{ pdu_api_timeout }}"
-    status_code: [200]
-  register: current_settings
-  when: pdu_check_before_write | bool
+# Step 2b: fail fast if two rows in `outlet` claim the same id — a dict
+# collapses duplicates silently, so compare lengths to catch that instead.
+- name: Fail on duplicate outlet ids in the outlet list
+  ansible.builtin.assert:
+    that:
+      - pdu_outlet_by_id | length == (outlet | default([]) | length)
+    fail_msg: >-
+      Two or more entries in {{ inventory_hostname }}'s `outlet` list share
+      the same id. Check host_vars for duplicates.
 
-- name: Determine if update is needed
+# Step 2c: walk 1..pdu_outlet_count, and for each id either use its
+# configured entry (from the lookup) or fall back to the unused defaults.
+# `configured` is empty ({}) for any id not in the lookup, so `.get()`
+# falling through to defaults handles both cases without a separate
+# active/unused branch.
+- name: Build normalized outlet list for every outlet on this PDU
   ansible.builtin.set_fact:
-    outlet_needs_update: >-
-      {{
-        (not pdu_check_before_write) or
-        (current_settings.json.startupState | default('') != outlet.startup_state) or
-        (current_settings.json.powerOnDelay | default(-1) | int != outlet.delay | int)
-      }}
+    pdu_outlets_full: "{{ pdu_outlets_full | default([]) + [entry] }}"
+  vars:
+    configured: "{{ pdu_outlet_by_id.get(outlet_num, {}) }}"
+    entry:
+      id: "{{ outlet_num }}"
+      name: "{{ configured.get('name', '') }}"
+      delay: "{{ configured.get('delay', pdu_active_default_delay if configured else pdu_unused_delay) }}"
+      state: "{{ pdu_active_startup_state if configured else pdu_unused_startup_state }}"
+  loop: "{{ range(1, (pdu_outlet_count | int) + 1) | list }}"
+  loop_control:
+    loop_var: outlet_num
 
-# --------------------------------------------------------------------------
-# Write desired settings
-# TODO: confirm HTTP verb (PATCH vs PUT) and exact JSON field names against
-# the real API docs / your existing pdu role's payload.
-# --------------------------------------------------------------------------
-- name: Apply startup settings to outlet
-  ansible.builtin.uri:
-    url: "{{ outlet_settings_url }}"
-    method: PATCH
-    body_format: json
-    body:
-      startupState: "{{ outlet.startup_state }}"   # TODO: confirm field name
-      powerOnDelay: "{{ outlet.delay | int }}"      # TODO: confirm field name
-    # TODO: same auth block as the GET task above
-    validate_certs: "{{ pdu_api_validate_certs }}"
-    timeout: "{{ pdu_api_timeout }}"
-    status_code: [200, 204]
-  when: outlet_needs_update | bool
-  register: outlet_apply_result
-
-- name: Report outcome for this outlet
+- name: Show planned changes (dry-run visibility)
   ansible.builtin.debug:
-    msg: >-
-      {{ inventory_hostname }} outlet {{ outlet.outlet_id }}
-      ({{ outlet.hostname if outlet.hostname else 'unused' }}):
-      {{ 'updated' if outlet_needs_update else 'already correct, skipped' }}
-      -> state={{ outlet.startup_state }}, delay={{ outlet.delay }}
+    var: pdu_outlets_full
+
+# ==========================================================================
+# 3. APPLY — same rset pattern as the existing role, extended with state
+# ==========================================================================
+- name: Configure name of each outlet
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset set
+    /powerDistribution/1/outlets/{{ item.id }}/identification/friendlyName
+    {{ item.name | quote }}
+  loop: "{{ pdu_outlets_full }}"
+  when: item.name | length > 0   # don't rename unused outlets away from their existing label
+  register: outlet_name_result
+  changed_when: outlet_name_result.rc == 0
+  failed_when: outlet_name_result.rc != 0
+  delegate_to: localhost
+
+- name: Set startup delay for each outlet
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset set
+    /powerDistribution/1/outlets/{{ item.id }}/settings/automaticSwitchOnDelay
+    {{ item.delay }}
+  loop: "{{ pdu_outlets_full }}"
+  when: item.delay is defined
+  register: outlet_delay_result
+  changed_when: outlet_delay_result.rc == 0
+  failed_when: outlet_delay_result.rc != 0
+  delegate_to: localhost
+
+- name: Set startup state for each outlet
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset set
+    /powerDistribution/1/outlets/{{ item.id }}/settings/stateOnStartup
+    {{ item.state }}
+  loop: "{{ pdu_outlets_full }}"
+  when: item.state is defined
+  register: outlet_state_result
+  changed_when: outlet_state_result.rc == 0
+  failed_when: outlet_state_result.rc != 0
+  delegate_to: localhost
+
+# ==========================================================================
+# 4. VERIFY — read back what was actually written and compare to desired
+# ==========================================================================
+- name: Include post-configuration verification
+  ansible.builtin.include_tasks: verify_outlet_settings.yml

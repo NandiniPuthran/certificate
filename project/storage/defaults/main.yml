@@ -1,26 +1,26 @@
----
-# --- Startup policy (per the requirement) --------------------------------
-pdu_active_startup_state: "lastKnownState"   # TODO: confirm exact enum value expected by API
+pdu_active_startup_state: "lastKnownState"
+pdu_active_default_delay: 60      # used only if a named outlet omits delay
 pdu_unused_startup_state: "off"
 pdu_unused_delay: 1200
-
-# --- Idempotency ----------------------------------------------------------
-# If true, GET current settings first and only PATCH/PUT when different.
-pdu_check_before_write: true
-
-# --- Safety ---------------------------------------------------------------
-# Require explicit confirmation before writing, similar in spirit to your
-# revoke_station_confirm pattern in other roles.
+ 
 pdu_apply_confirm: false
 
-# --- API connection defaults (can be overridden in group_vars/pdus.yml) ---
-pdu_api_scheme: "https"
-pdu_api_version: "1.0"
-pdu_api_validate_certs: false
-pdu_api_timeout: 10
-
-
-#hostvars 
-pdu_host: pdu1.dc.local
-pdu_outlet_id: 1
-pdu_startup_delay: 43
+pdu_outlet_count: 42
+ 
+pdu_unused_startup_state: "off"
+pdu_unused_delay: 1200
+ 
+# Existing variable name/structure from your current role — unchanged.
+# "state" is intentionally NOT stored here; it's computed by the role
+# based on whether an outlet appears in this list at all.
+outlet:
+  - id: 1
+    name: esxi01
+    delay: 43
+  - id: 2
+    name: esxi02
+    delay: 60
+  - id: 5
+    name: storage-bay-1
+    delay: 30
+ 

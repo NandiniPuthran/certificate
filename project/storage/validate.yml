@@ -1,0 +1,83 @@
+---
+# Reads back what's actually on the PDU after the "set" tasks and compares
+# to what we intended to write. This is the "did it actually take" check —
+# separate from the set tasks' rc check, which only tells you the CLI call
+# itself didn't error, not that the PDU applied/persisted the value.
+#
+# TODO: confirm the exact stdout format of `rset get`. Assumed here to be
+# either the bare value, or "<path> = <value>" — adjust the parsing filter
+# below (currently a regex_replace to strip everything up to a possible
+# "= ") once you've seen real output from your environment.
+
+- name: Read back current outlet name
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset get
+    /powerDistribution/1/outlets/{{ item.id }}/identification/friendlyName
+  loop: "{{ pdu_outlets_full }}"
+  when: item.name | length > 0
+  register: verify_name_result
+  changed_when: false
+  delegate_to: localhost
+
+- name: Read back current startup delay
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset get
+    /powerDistribution/1/outlets/{{ item.id }}/settings/automaticSwitchOnDelay
+  loop: "{{ pdu_outlets_full }}"
+  register: verify_delay_result
+  changed_when: false
+  delegate_to: localhost
+
+- name: Read back current startup state
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset get
+    /powerDistribution/1/outlets/{{ item.id }}/settings/stateOnStartup
+  loop: "{{ pdu_outlets_full }}"
+  register: verify_state_result
+  changed_when: false
+  delegate_to: localhost
+
+# --------------------------------------------------------------------------
+# Compare read-back values to desired and fail loudly on any mismatch,
+# rather than silently trusting that "rc == 0 on set" meant it stuck.
+# --------------------------------------------------------------------------
+- name: Assert delay matches desired value for every outlet
+  ansible.builtin.assert:
+    that:
+      - (verify_delay_result.results[idx].stdout | trim | regex_replace('^.*=\\s*', '')) == (item.delay | string)
+    fail_msg: >-
+      Outlet {{ item.id }} on {{ inventory_hostname }}: expected delay
+      {{ item.delay }}, PDU reports
+      '{{ verify_delay_result.results[idx].stdout | trim }}'.
+    success_msg: "Outlet {{ item.id }} delay verified: {{ item.delay }}"
+  loop: "{{ pdu_outlets_full }}"
+  loop_control:
+    index_var: idx
+    label: "outlet {{ item.id }}"
+
+- name: Assert startup state matches desired value for every outlet
+  ansible.builtin.assert:
+    that:
+      - (verify_state_result.results[idx].stdout | trim | regex_replace('^.*=\\s*', '')) == (item.state | string)
+    fail_msg: >-
+      Outlet {{ item.id }} on {{ inventory_hostname }}: expected state
+      {{ item.state }}, PDU reports
+      '{{ verify_state_result.results[idx].stdout | trim }}'.
+    success_msg: "Outlet {{ item.id }} state verified: {{ item.state }}"
+  loop: "{{ pdu_outlets_full }}"
+  loop_control:
+    index_var: idx
+    label: "outlet {{ item.id }}"
+
+- name: Assert name matches desired value for named outlets
+  ansible.builtin.assert:
+    that:
+      - (verify_name_result.results | selectattr('item.id', 'equalto', item.id) | list | first).stdout | trim | regex_replace('^.*=\\s*', '') == item.name
+    fail_msg: >-
+      Outlet {{ item.id }} on {{ inventory_hostname }}: expected name
+      '{{ item.name }}', PDU reports something different.
+    success_msg: "Outlet {{ item.id }} name verified: {{ item.name }}"
+  loop: "{{ pdu_outlets_full }}"
+  loop_control:
+    label: "outlet {{ item.id }}"
+  when: item.name | length > 0
