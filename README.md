@@ -399,3 +399,56 @@ openssl ocsp \
 - `crl.company.example` A record created via `ipa dnsrecord-add`
 - If using external DNS (Route53, Infoblox), replace the IPA DNS tasks in `playbooks/dns_preparation.yml` with the appropriate Ansible module
 - CNAME records are **not recommended** for CRL/OCSP endpoints (some clients don't follow CNAME in CDP)
+
+
+On the IPA server (or any host with ipa-getkeytab and admin rights), create the automation account and pull its keytab:
+
+   ipa user-add pduautomation --first=PDU --last=Automation --password
+   ipa role-add-member "Certificate Administrators" --users=pduautomation
+   ipa-getkeytab -p pduautomation@YOURREALM -k /etc/pdu-automation/pduautomation.keytab
+
+Move that keytab file to your Ansible controller (the IPA-enrolled host running sign.yml), lock it down:
+
+   chmod 600 /etc/pdu-automation/pduautomation.keytab
+   chown ansible_user:ansible_user /etc/pdu-automation/pduautomation.keytab
+
+Reference it in your role vars, e.g. group_vars/all/vault.yml or wherever you keep secrets currently:
+
+yaml   ipa_automation_keytab: /etc/pdu-automation/pduautomation.keytab
+   ipa_automation_principal: pduautomation@YOURREALM
+That's it — nothing exotic, just the standard "unattended service account" pattern IPA/Kerberos environments use everywhere.
+What would help most right now — do you want to just proceed with this setup and move to testing the CSR from the upgraded firmware, or is there a specific piece (the ipa role-add-member permissions, the vault storage, something else) you want to slow down on?i dont think i have keytab ...how to configure the sameOrchestrated keytab creation and permission configuration strategyOrchestrated keytab creation and permission configuration strategyNo problem — it's a one-time setup. Here's the full walkthrough.
+Step 1: Create the automation user in IPA
+Run this on a host where you're kinit'd as admin (interactively is fine for this one-time setup):
+bashkinit admin
+ipa user-add pduautomation --first=PDU --last=Automation --password
+It'll prompt you to set an initial password. IPA will likely force a password reset on first login — for a service account that never logs in interactively, that's a problem. Fix it so the password never expires interactively, or better: skip password login entirely and only ever use the keytab. You can set this via:
+bashipa user-mod pduautomation --setattr krbpasswordexpiration=20991231235959Z
+(or check your IPA password policy — some orgs just exempt service accounts from policy)
+Step 2: Grant it minimal cert-request privilege
+bashipa role-add-member "Certificate Administrators" --users=pduautomation
+Check this actually covers cert-request for your target profile — if Certificate Administrators is too broad or doesn't map correctly, you can build a custom role scoped to just Request Certificate permission instead:
+bashipa role-add "PDU Cert Requester"
+ipa role-add-privilege "PDU Cert Requester" --privileges="Request Certificate"
+ipa role-add-member "PDU Cert Requester" --users=pduautomation
+Step 3: Generate the keytab
+This is the actual keytab creation — do this on the IPA server itself, or any host with ipa-getkeytab installed (part of freeipa-client / sssd-tools packages):
+bashmkdir -p /etc/pdu-automation
+ipa-getkeytab -p pduautomation@YOURREALM.COM -k /etc/pdu-automation/pduautomation.keytab
+This extracts a keytab for pduautomation and writes it to that file. Important: each time you run ipa-getkeytab for the same principal, it rotates the key — the old keytab stops working. So generate it once, and don't casually re-run it later without knowing that invalidates the previous file.
+Step 4: Move it to wherever sign.yml runs from
+If that's your Ansible controller (already IPA-enrolled per your earlier confirmation), copy the file there:
+bashscp /etc/pdu-automation/pduautomation.keytab controller:/etc/pdu-automation/
+Then lock it down:
+bashchmod 600 /etc/pdu-automation/pduautomation.keytab
+chown <ansible_service_user>:<ansible_service_user> /etc/pdu-automation/pduautomation.keytab
+Step 5: Verify it works before wiring it into the role
+bashkinit -kt /etc/pdu-automation/pduautomation.keytab pduautomation@YOURREALM.COM
+klist
+klist should show a valid ticket for pduautomation@YOURREALM.COM. If that works, test the actual permission:
+bashipa cert-request --help
+(just confirms the command's reachable under this identity — real test comes once you have a CSR to try against it)
+Step 6: Reference in your role
+yamlipa_automation_keytab: /etc/pdu-automation/pduautomation.keytab
+ipa_automation_principal: pduautomation@YOURREALM.COM
+Once this is in place and klist confirms it works, you're ready to test the actual cert-request flow against a real CSR from the upgraded PDU. Want to go through that CSR inspection step next, or work through the firmware upgrade first since that's the blocking dependency?
