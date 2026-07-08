@@ -8,6 +8,43 @@
 # Called from validate.yml after controller tests pass.
 
 
+---
+- name: Obtain Kerberos ticket for cert-request automation account
+  ansible.builtin.command: >
+    kinit -kt {{ ipa_automation_keytab }} {{ ipa_automation_principal }}
+  changed_when: false
+  delegate_to: "{{ ipa_client_host | default('localhost') }}"
+
+- name: Check for existing valid certificate for this PDU
+  ansible.builtin.command: >
+    ipa cert-find --principal="{{ pdu_ipa_service }}" --certificate
+  register: existing_pdu_cert
+  changed_when: false
+  failed_when: false
+  delegate_to: "{{ ipa_client_host | default('localhost') }}"
+
+- name: Request signed certificate from IPA CA
+  ansible.builtin.command: >
+    ipa cert-request {{ pdu_csr_local_path }}
+    --principal="{{ pdu_ipa_service }}"
+    --certificate-out={{ pdu_signed_cert_local_path }}
+    --profile-id={{ ipa_cert_profile | default('caIPAserviceCert') }}
+  register: cert_request_result
+  when: existing_pdu_cert.rc != 0
+  changed_when: "'certificate' in cert_request_result.stdout | default('')"
+  delegate_to: "{{ ipa_client_host | default('localhost') }}"
+
+- name: Slurp signed certificate content
+  ansible.builtin.slurp:
+    src: "{{ pdu_signed_cert_local_path }}"
+  register: signed_cert_content
+  delegate_to: "{{ ipa_client_host | default('localhost') }}"
+
+- name: Destroy Kerberos ticket
+  ansible.builtin.command: kdestroy
+  changed_when: false
+  delegate_to: "{{ ipa_client_host | default('localhost') }}"
+
 # ── IPA enrollment ────────────────────────────────────────────────────────────
 
 - name: "[IPA] Check /etc/ipa/default.conf exists (IPA enrolled)"
