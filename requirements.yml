@@ -12,3 +12,65 @@ collections:
 
 # Install with:
 #   ansible-galaxy collection install -r requirements.yml
+
+
+Subject: Bug Report: CSR Common Name not using FQDN under CA/CB Compliance mode — Rack PDU G4, Firmware [VERSION]
+
+Hi Eaton Support Team,
+
+We are reporting a firmware defect on the Eaton Rack PDU G4 where Certificate Signing Request (CSR) generation does not populate the Common Name (CN) with the FQDN when CA/CB compliance mode is enabled, contrary to what is documented in the firmware release notes.
+
+--- Environment ---
+Model: [EXACT MODEL NUMBER, e.g. EVMAGU23A-E]
+Firmware version: [EXACT VERSION/BUILD STRING]
+Network module firmware version (if separately versioned): [VERSION, if applicable]
+Serial number: [SERIAL NUMBER]
+
+--- Reference ---
+The release notes for this firmware version state that CSR generation with CA/CB compliance enabled now uses the FQDN as the Common Name, for improved certificate standard compliance. This behavior is not observed in testing.
+
+--- Configuration confirmed prior to testing ---
+Settings > General > System details > System name: [VALUE]
+Settings > TCP/IP > DNS Configuration > Domain name: [VALUE]
+Expected FQDN: [system name].[domain name]
+
+--- Steps to reproduce ---
+1. Configure System name and Domain name as above.
+2. Reboot the device to ensure settings are applied.
+3. Navigate to the certificate/CSR generation page.
+4. Select the CA/CB compliance CSR generation option.
+5. Generate a new CSR.
+6. Inspect the CSR using: openssl req -in pdu.csr -noout -text
+
+--- Expected result ---
+CN = [expected FQDN]
+
+--- Actual result ---
+CN = [actual value observed, e.g. hostname only]
+
+--- Additional testing performed ---
+For comparison, we also generated a CSR using the standard (non-CA/CB compliance) option, which produced the following CN: [VALUE]. This was done to confirm whether the CA/CB toggle has any effect on CSR generation at all.
+
+We also confirmed:
+- The System name field change was verified to persist after saving (re-checked in UI post-save).
+- A full device reboot was performed after the configuration change, prior to generating the CSR referenced above.
+- Firmware version was re-verified via the WebUI after the reboot to confirm the upgrade was applied correctly.
+
+--- Impact ---
+This prevents us from obtaining CA/CB Forum baseline-compliant certificates (FQDN-based CN with matching SAN) for this device, which blocks our certificate lifecycle automation and compliance requirements.
+
+--- Attachments ---
+1. CSR file generated with CA/CB compliance enabled (pdu_cabf.csr)
+2. CSR file generated without CA/CB compliance (pdu_standard.csr)
+3. Decoded CSR output (openssl req -noout -text) for both files, as text
+4. Screenshot: Settings > General > System details showing System name value
+5. Screenshot: Settings > TCP/IP > DNS Configuration showing Domain name value
+6. Screenshot: Firmware/device information page showing installed version
+7. Screenshot: CSR generation page showing CA/CB compliance option selected
+
+Please let us know if any additional diagnostic logs would help investigate this, and what the expected timeline is for a fix or workaround.
+
+Thank you,
+[YOUR NAME]
+[YOUR TITLE/TEAM]
+[CONTACT INFO]
