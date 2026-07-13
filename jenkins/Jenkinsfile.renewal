@@ -165,66 +165,48 @@ pipeline {
     }
 }
 
-
-import jenkins.model.*
-import com.michelin.cio.hudson.plugins.rolestrategy.*
+import com.michelin.cio.hudson.plugins.rolestrategy.AuthorizationType
+import com.michelin.cio.hudson.plugins.rolestrategy.PermissionEntry
+import com.michelin.cio.hudson.plugins.rolestrategy.RoleBasedAuthorizationStrategy
+import com.michelin.cio.hudson.plugins.rolestrategy.Role
+import com.synopsys.arc.jenkins.plugins.rolestrategy.RoleType
 import hudson.security.Permission
-import hudson.model.Hudson
+import jenkins.model.Jenkins
 
-def instance = Jenkins.instance
-def authStrategy = instance.getAuthorizationStrategy()
+def jenkins = Jenkins.get()
+def strategy = jenkins.getAuthorizationStrategy()
 
-if (!(authStrategy instanceof RoleBasedAuthorizationStrategy)) {
-    println "ERROR: Instance is not using RoleBasedAuthorizationStrategy. Current: ${authStrategy.class.name}"
+if (!(strategy instanceof RoleBasedAuthorizationStrategy)) {
+    println "ERROR: not RoleBasedAuthorizationStrategy, found ${strategy.class.name}"
     return
 }
+def rbas = (RoleBasedAuthorizationStrategy) strategy
 
-def rbas = (RoleBasedAuthorizationStrategy) authStrategy
-
-// ---- 1. Create/update the Global role: ensure Overall/Read exists ----
-def globalRoleMap = rbas.getRoleMap(RoleBasedAuthorizationStrategy.GLOBAL)
-def existingGlobalRole = globalRoleMap.getRole("monitoring-global-read")
-
-if (existingGlobalRole == null) {
-    def globalPermissions = [Hudson.READ] as Set
-    def newGlobalRole = new Role("monitoring-global-read", globalPermissions)
-    globalRoleMap.addRole(newGlobalRole)
-    println "Created global role: monitoring-global-read"
-} else {
-    println "Global role monitoring-global-read already exists"
+// ---- Global role: Overall/Read ----
+def globalRoleMap = rbas.getRoleMap(RoleType.Global)
+def globalRole = globalRoleMap.getRole("monitoring-global-read")
+if (globalRole == null) {
+    globalRole = new Role("monitoring-global-read", [Jenkins.READ] as Set)
+    globalRoleMap.addRole(globalRole)
+    println "Created global role monitoring-global-read"
 }
+globalRoleMap.assignRole(globalRole, new PermissionEntry(AuthorizationType.USER, "monitor-svc"))
+println "Assigned monitor-svc to global role"
 
-// Assign user to global role
-globalRoleMap.assignRole(globalRoleMap.getRole("monitoring-global-read"), "monitor-svc")
-println "Assigned monitor-svc to global role monitoring-global-read"
-
-// ---- 2. Create/update the Item (project) role: Job/Read across all jobs ----
-def itemRoleMap = rbas.getRoleMap(RoleBasedAuthorizationStrategy.PROJECT)
-def existingItemRole = itemRoleMap.getRole("monitoring-readonly")
-
-def jobReadPerm = hudson.model.Item.READ
-def jobWorkspacePerm = hudson.model.Item.WORKSPACE
-def jobConfigurePerm = null // deliberately NOT granting configure/build
-
-def itemPermissions = [jobReadPerm] as Set
-
-if (existingItemRole == null) {
-    def newItemRole = new Role("monitoring-readonly", ".*", itemPermissions)
-    itemRoleMap.addRole(newItemRole)
-    println "Created item role: monitoring-readonly with pattern '.*'"
-} else {
-    println "Item role monitoring-readonly already exists with pattern: ${existingItemRole.getPattern()}"
+// ---- Project/Item role: Job/Read, pattern = all jobs ----
+def projectRoleMap = rbas.getRoleMap(RoleType.Project)
+def itemRole = projectRoleMap.getRole("monitoring-readonly")
+if (itemRole == null) {
+    itemRole = new Role("monitoring-readonly", ".*", [hudson.model.Item.READ] as Set)
+    projectRoleMap.addRole(itemRole)
+    println "Created item role monitoring-readonly with pattern .*"
 }
+projectRoleMap.assignRole(itemRole, new PermissionEntry(AuthorizationType.USER, "monitor-svc"))
+println "Assigned monitor-svc to item role"
 
-// Assign user to item role
-itemRoleMap.assignRole(itemRoleMap.getRole("monitoring-readonly"), "monitor-svc")
-println "Assigned monitor-svc to item role monitoring-readonly"
+jenkins.save()
+println "Saved."
 
-// ---- 3. Persist changes ----
-instance.save()
-println "Configuration saved."
-
-// ---- 4. Verify assignment ----
-println "\n--- Verification ---"
-println "Global roles for monitor-svc: " + globalRoleMap.getRolesForSid("monitor-svc", true)*.name
-println "Item roles for monitor-svc: " + itemRoleMap.getRolesForSid("monitor-svc", true)*.name
+// ---- Verify ----
+println "\nGlobal authorities: " + globalRoleMap.getSidEntries()
+println "Project authorities: " + projectRoleMap.getSidEntries()
