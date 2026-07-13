@@ -115,3 +115,64 @@
 # ==========================================================================
 - name: Include post-configuration verification
   ansible.builtin.include_tasks: verify_outlet_settings.yml
+
+
+
+  ---
+# pdu_outlet/tasks/validate.yml
+# Verifies stateOnStartup and automaticSwitchOnDelay match the configured
+# values in host_vars 'outlet' list, after apply.yml has run.
+
+- name: Get current stateOnStartup for each outlet
+  ansible.builtin.command: >
+    {{ rset_cli }} outlet {{ item.id }} get stateOnStartup
+    -i {{ pdu_ip }} -u {{ pdu_user }} -p {{ pdu_pass }}
+  loop: "{{ outlet }}"
+  loop_control:
+    label: "outlet {{ item.id }}"
+  register: outlet_startup_state_check
+  changed_when: false
+
+- name: Get current automaticSwitchOnDelay for each outlet
+  ansible.builtin.command: >
+    {{ rset_cli }} outlet {{ item.id }} get automaticSwitchOnDelay
+    -i {{ pdu_ip }} -u {{ pdu_user }} -p {{ pdu_pass }}
+  loop: "{{ outlet }}"
+  loop_control:
+    label: "outlet {{ item.id }}"
+  register: outlet_startup_delay_check
+  changed_when: false
+
+- name: Build validation results per outlet
+  ansible.builtin.set_fact:
+    outlet_validation_results: >-
+      {{ outlet_validation_results | default([]) + [{
+        'id': item.0.item.id,
+        'expected_state': item.0.item.stateOnStartup,
+        'actual_state': item.0.stdout | trim,
+        'state_match': (item.0.stdout | trim == item.0.item.stateOnStartup | string),
+        'expected_delay': item.1.item.automaticSwitchOnDelay,
+        'actual_delay': item.1.stdout | trim,
+        'delay_match': (item.1.stdout | trim == item.1.item.automaticSwitchOnDelay | string)
+      }] }}
+  loop: "{{ outlet_startup_state_check.results | zip(outlet_startup_delay_check.results) | list }}"
+  loop_control:
+    label: "outlet {{ item.0.item.id }}"
+
+- name: Display validation results
+  ansible.builtin.debug:
+    var: outlet_validation_results
+
+- name: Fail if any outlet startup config does not match expected values
+  ansible.builtin.assert:
+    that:
+      - item.state_match
+      - item.delay_match
+    fail_msg: >-
+      Outlet {{ item.id }} mismatch — expected stateOnStartup={{ item.expected_state }}
+      (got {{ item.actual_state }}), automaticSwitchOnDelay={{ item.expected_delay }}
+      (got {{ item.actual_delay }})
+    success_msg: "Outlet {{ item.id }} validated: stateOnStartup and automaticSwitchOnDelay match"
+  loop: "{{ outlet_validation_results }}"
+  loop_control:
+    label: "outlet {{ item.id }}"

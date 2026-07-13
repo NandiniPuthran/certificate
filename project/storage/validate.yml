@@ -81,3 +81,84 @@
   loop_control:
     label: "outlet {{ item.id }}"
   when: item.name | length > 0
+
+
+  ===================================================
+  ---
+# pdu_outlet/tasks/validate.yml
+# Validates that stateOnStartup and automaticSwitchOnDelay on the actual
+# PDU match what configure.yml intended to set, per pdu_outlets_full.
+# Assumes pdu_outlets_full was already built this run (configure.yml ran
+# first in the same play). If not, rebuild it before calling this file.
+
+- name: Ensure pdu_outlets_full was built before validating
+  ansible.builtin.assert:
+    that:
+      - pdu_outlets_full is defined
+      - pdu_outlets_full | length > 0
+    fail_msg: >-
+      pdu_outlets_full is not set — run configure.yml's build step first,
+      or import it here if validating standalone.
+
+# ==========================================================================
+# READ CURRENT VALUES FROM THE PDU
+# ==========================================================================
+- name: Get current automaticSwitchOnDelay for each outlet
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset get
+    /powerDistribution/1/outlets/{{ item.id }}/settings/automaticSwitchOnDelay
+  loop: "{{ pdu_outlets_full }}"
+  loop_control:
+    label: "outlet {{ item.id }}"
+  register: outlet_delay_check
+  changed_when: false
+  delegate_to: localhost
+
+- name: Get current stateOnStartup for each outlet
+  ansible.builtin.shell: >-
+    {{ eaton_payload }} rset get
+    /powerDistribution/1/outlets/{{ item.id }}/settings/stateOnStartup
+  loop: "{{ pdu_outlets_full }}"
+  loop_control:
+    label: "outlet {{ item.id }}"
+  register: outlet_state_check
+  changed_when: false
+  delegate_to: localhost
+
+# ==========================================================================
+# COMPARE EXPECTED (pdu_outlets_full) vs ACTUAL (PDU response)
+# ==========================================================================
+- name: Build per-outlet validation results
+  ansible.builtin.set_fact:
+    pdu_outlet_validation: >-
+      {{ pdu_outlet_validation | default([]) + [{
+        'id': item.0.item.id,
+        'name': item.0.item.name,
+        'expected_delay': item.0.item.delay | string,
+        'actual_delay': item.0.stdout | trim,
+        'delay_match': (item.0.stdout | trim == item.0.item.delay | string),
+        'expected_state': item.1.item.state | string,
+        'actual_state': item.1.stdout | trim,
+        'state_match': (item.1.stdout | trim == item.1.item.state | string)
+      }] }}
+  loop: "{{ outlet_delay_check.results | zip(outlet_state_check.results) | list }}"
+  loop_control:
+    label: "outlet {{ item.0.item.id }}"
+
+- name: Display validation results
+  ansible.builtin.debug:
+    var: pdu_outlet_validation
+
+- name: Fail if any outlet does not match its expected configuration
+  ansible.builtin.assert:
+    that:
+      - item.delay_match
+      - item.state_match
+    fail_msg: >-
+      Outlet {{ item.id }} ({{ item.name }}) mismatch — expected
+      delay={{ item.expected_delay }} (got {{ item.actual_delay }}),
+      state={{ item.expected_state }} (got {{ item.actual_state }})
+    success_msg: "Outlet {{ item.id }} ({{ item.name }}) validated OK"
+  loop: "{{ pdu_outlet_validation }}"
+  loop_control:
+    label: "outlet {{ item.id }}"
