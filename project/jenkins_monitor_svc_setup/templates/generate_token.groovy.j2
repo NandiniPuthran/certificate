@@ -1,0 +1,27 @@
+import jenkins.model.*
+import jenkins.security.ApiTokenProperty
+
+def username  = "{{ jenkins_monitor_user }}"
+def tokenName = "{{ jenkins_token_name }}"
+
+def user = User.getById(username, true)
+if (user == null) {
+    println "ERROR: could not create/find User object for ${username}"
+    return
+}
+
+def apiTokenProperty = user.getProperty(ApiTokenProperty.class)
+
+// Idempotency: revoke any existing token with this exact name first,
+// so re-running the role doesn't pile up duplicate tokens.
+apiTokenProperty.tokenStore.tokenList.findAll { it.name == tokenName }.each {
+    apiTokenProperty.tokenStore.revokeToken(it.uuid)
+    println "Revoked existing token named '${tokenName}' (uuid=${it.uuid})"
+}
+
+def result = apiTokenProperty.tokenStore.generateNewToken(tokenName)
+user.save()
+
+// Marker line the Ansible task parses out — plain value shown once only
+println "TOKEN_VALUE=${result.plainValue}"
+println "RESULT=SUCCESS"

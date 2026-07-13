@@ -1,0 +1,45 @@
+import com.michelin.cio.hudson.plugins.rolestrategy.AuthorizationType
+import com.michelin.cio.hudson.plugins.rolestrategy.PermissionEntry
+import com.michelin.cio.hudson.plugins.rolestrategy.RoleBasedAuthorizationStrategy
+import com.michelin.cio.hudson.plugins.rolestrategy.Role
+import com.synopsys.arc.jenkins.plugins.rolestrategy.RoleType
+import hudson.security.Permission
+import jenkins.model.Jenkins
+
+def jenkins  = Jenkins.get()
+def strategy = jenkins.getAuthorizationStrategy()
+
+if (!(strategy instanceof RoleBasedAuthorizationStrategy)) {
+    println "ERROR: instance is not using RoleBasedAuthorizationStrategy (found ${strategy.class.name})"
+    return
+}
+def rbas = (RoleBasedAuthorizationStrategy) strategy
+
+// ---- Global role: baseline Overall/Read ----
+def globalRoleMap = rbas.getRoleMap(RoleType.Global)
+def globalRole = globalRoleMap.getRole("{{ jenkins_global_role_name }}")
+if (globalRole == null) {
+    globalRole = new Role("{{ jenkins_global_role_name }}", [Jenkins.READ] as Set)
+    globalRoleMap.addRole(globalRole)
+    println "Created global role: {{ jenkins_global_role_name }}"
+} else {
+    println "Global role {{ jenkins_global_role_name }} already exists — reusing"
+}
+globalRoleMap.assignRole(globalRole, new PermissionEntry(AuthorizationType.USER, "{{ jenkins_monitor_user }}"))
+println "Assigned {{ jenkins_monitor_user }} to global role {{ jenkins_global_role_name }}"
+
+// ---- Item/Project role: Job/Read scoped by pattern ----
+def projectRoleMap = rbas.getRoleMap(RoleType.Project)
+def itemRole = projectRoleMap.getRole("{{ jenkins_item_role_name }}")
+if (itemRole == null) {
+    itemRole = new Role("{{ jenkins_item_role_name }}", "{{ jenkins_item_role_pattern }}", [hudson.model.Item.READ] as Set)
+    projectRoleMap.addRole(itemRole)
+    println "Created item role: {{ jenkins_item_role_name }} (pattern: {{ jenkins_item_role_pattern }})"
+} else {
+    println "Item role {{ jenkins_item_role_name }} already exists — reusing"
+}
+projectRoleMap.assignRole(itemRole, new PermissionEntry(AuthorizationType.USER, "{{ jenkins_monitor_user }}"))
+println "Assigned {{ jenkins_monitor_user }} to item role {{ jenkins_item_role_name }}"
+
+jenkins.save()
+println "RESULT=SUCCESS"

@@ -1,0 +1,21 @@
+---
+# =====================================================================
+# Jenkins monitor-svc setup: generate token -> assign read-only role
+# -> validate. Each phase can be toggled independently via defaults.
+# =====================================================================
+
+- name: Generate Jenkins API token for {{ jenkins_monitor_user }}
+  include_tasks: generate_token.yml
+  when: jenkins_generate_token | bool
+
+- name: Assign read-only permissions to {{ jenkins_monitor_user }}
+  include_tasks: assign_permissions.yml
+  when: jenkins_assign_permissions | bool
+
+- name: Validate read-only access for {{ jenkins_monitor_user }}
+  include_tasks: validate_readonly.yml
+  when: jenkins_validate_access | bool
+  vars:
+    # jenkins_monitor_api_token must exist by this point — either just
+    # generated above, or pre-supplied via -e if you skipped phase 1
+    _validation_token: "{{ jenkins_monitor_api_token | default(omit) }}"

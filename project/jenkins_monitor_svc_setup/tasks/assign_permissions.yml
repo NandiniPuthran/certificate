@@ -1,0 +1,27 @@
+---
+- name: Render role-assignment Groovy script
+  set_fact:
+    _assign_script: "{{ lookup('template', 'assign_role.groovy.j2') }}"
+
+- name: Execute role-assignment script via Jenkins Script Console
+  uri:
+    url: "{{ jenkins_url }}/scriptText"
+    method: POST
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_token }}"
+    force_basic_auth: true
+    body_format: form-urlencoded
+    body:
+      script: "{{ _assign_script }}"
+    status_code: 200
+    return_content: true
+  register: _assign_script_result
+
+- name: Fail if role assignment script reported an error
+  fail:
+    msg: "Role assignment failed: {{ _assign_script_result.content }}"
+  when: "'RESULT=SUCCESS' not in _assign_script_result.content"
+
+- name: Show role assignment output
+  debug:
+    msg: "{{ _assign_script_result.content_lines | default(_assign_script_result.content.split('\n')) }}"

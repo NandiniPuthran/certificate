@@ -1,0 +1,35 @@
+---
+# Example: setup_jenkins_monitor_svc.yml
+#
+# Run with:
+#   ansible-playbook setup_jenkins_monitor_svc.yml \
+#     -e "jenkins_url=https://jenkins.internal" \
+#     --vault-password-file .vault_pass
+#
+# Re-run safely any time — every phase is idempotent (token regeneration
+# revokes-then-recreates by name, role/assignment creation checks for
+# existing roles before creating).
+
+- name: Provision and validate Jenkins monitor-svc account
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    vault_jenkins_admin_token: "{{ lookup('community.hashi_vault.hashi_vault', 'secret=jenkins/admin_token') | default(omit) }}"
+    run_role_assignment: true   # flip to false if it was already applied and you only want to re-validate
+
+  tasks:
+    - name: Provision monitor-svc token + read-only role + validate
+      include_role:
+        name: jenkins_monitor_svc_setup
+      vars:
+        jenkins_url: "https://jenkins.internal"
+        jenkins_admin_user: "admin"
+        jenkins_admin_token: "{{ vault_jenkins_admin_token }}"
+        jenkins_monitor_user: "monitor-svc"
+        jenkins_token_name: "monitoring-token"
+        jenkins_item_role_pattern: ".*"   # or scope tighter, e.g. "^infra/.*"
+        jenkins_persist_token: true
+        jenkins_token_output_path: "/tmp/monitor-svc_token.txt"
+        jenkins_assign_permissions: "{{ run_role_assignment }}"
+      when: jenkins_url is defined

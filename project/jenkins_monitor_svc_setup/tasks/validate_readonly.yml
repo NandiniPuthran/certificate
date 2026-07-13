@@ -1,0 +1,136 @@
+---
+- name: Determine which token to validate with
+  set_fact:
+    _validate_token: "{{ _validation_token | default(jenkins_monitor_api_token) }}"
+  no_log: true
+
+- name: Confirm baseline authentication (Overall/Read)
+  uri:
+    url: "{{ jenkins_url }}/api/json"
+    method: GET
+    user: "{{ jenkins_monitor_user }}"
+    password: "{{ _validate_token }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: true
+  register: baseline_check
+  no_log: true
+
+- name: Fail early if baseline auth fails
+  fail:
+    msg: "{{ jenkins_monitor_user }} cannot reach /api/json — Overall/Read binding is missing or token is invalid"
+  when: baseline_check.status != 200
+
+- name: Discover jobs visible to monitor user (recursive, no prior job-name knowledge needed)
+  uri:
+    url: "{{ jenkins_url }}/api/json?tree={{ jenkins_discovery_tree }}"
+    method: GET
+    user: "{{ jenkins_monitor_user }}"
+    password: "{{ _validate_token }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: true
+  register: discovered_jobs
+  no_log: true
+
+- name: Flatten discovered job list (top level + one nested folder level)
+  set_fact:
+    flat_jobs: >-
+      {{
+        discovered_jobs.json.jobs | map(attribute='url') | list
+        +
+        discovered_jobs.json.jobs
+        | selectattr('jobs', 'defined')
+        | map(attribute='jobs')
+        | flatten
+        | map(attribute='url')
+        | list
+      }}
+
+- name: Report visible job count
+  debug:
+    msg: "{{ jenkins_monitor_user }} can see {{ flat_jobs | length }} job(s) via API listing"
+
+- name: Warn if zero jobs are visible
+  debug:
+    msg: >-
+      WARNING: no jobs visible at all. This usually means Job/Read is not
+      bound for {{ jenkins_monitor_user }}, even though Overall/Read works.
+  when: flat_jobs | length == 0
+
+# ---- READ CHECK: confirm console logs are actually readable ----
+- name: Check console log read access per visible job
+  uri:
+    url: "{{ item }}lastBuild/consoleText"
+    method: GET
+    user: "{{ jenkins_monitor_user }}"
+    password: "{{ _validate_token }}"
+    force_basic_auth: true
+    status_code: [200, 403, 404]   # 404 = no builds yet, not a permission failure
+    return_content: false
+  register: log_checks
+  loop: "{{ flat_jobs }}"
+  loop_control:
+    label: "{{ item }}"
+  when: flat_jobs | length > 0
+  no_log: true
+
+- name: Assert log read access works (200 or 404-no-builds, never 403)
+  assert:
+    that:
+      - item.status in [200, 404]
+    fail_msg: "Log READ FAILED for {{ item.item }} (HTTP {{ item.status }}) — Job/Read gap"
+    success_msg: "Log read OK for {{ item.item }} (HTTP {{ item.status }})"
+  loop: "{{ log_checks.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: flat_jobs | length > 0
+  ignore_errors: true
+  register: read_assertions
+
+# ---- WRITE CHECK: non-destructive — GET on /configure, never POST ----
+- name: Check that job configure page is blocked (confirms no write access)
+  uri:
+    url: "{{ item }}configure"
+    method: GET
+    user: "{{ jenkins_monitor_user }}"
+    password: "{{ _validate_token }}"
+    force_basic_auth: true
+    status_code: [200, 403]
+    return_content: false
+  register: configure_checks
+  loop: "{{ flat_jobs }}"
+  loop_control:
+    label: "{{ item }}"
+  when: flat_jobs | length > 0
+  no_log: true
+
+- name: Assert configure/write access is blocked everywhere
+  assert:
+    that:
+      - item.status == 403
+    fail_msg: "SECURITY ISSUE: {{ jenkins_monitor_user }} CAN access configure page for {{ item.item }} (HTTP {{ item.status }}) — Job/Configure may be granted unintentionally"
+    success_msg: "Confirmed read-only: configure blocked for {{ item.item }}"
+  loop: "{{ configure_checks.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: flat_jobs | length > 0
+  ignore_errors: true
+  register: write_assertions
+
+# ---- Summary ----
+- name: Final validation summary
+  debug:
+    msg:
+      - "Baseline auth (Overall/Read):  OK"
+      - "Jobs visible:                  {{ flat_jobs | length }}"
+      - "Read failures:                 {{ read_assertions.results | default([]) | selectattr('failed', 'equalto', true) | list | length }}"
+      - "Write-access leaks (SHOULD BE 0): {{ write_assertions.results | default([]) | selectattr('failed', 'equalto', true) | list | length }}"
+
+- name: Fail the play if any read failure or write leak was found
+  fail:
+    msg: "Validation failed — see summary above for details"
+  when: >
+    (read_assertions.results | default([]) | selectattr('failed', 'equalto', true) | list | length > 0)
+    or
+    (write_assertions.results | default([]) | selectattr('failed', 'equalto', true) | list | length > 0)

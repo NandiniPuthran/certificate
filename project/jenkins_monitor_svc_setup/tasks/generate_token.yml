@@ -1,0 +1,41 @@
+---
+- name: Render token-generation Groovy script
+  set_fact:
+    _token_script: "{{ lookup('template', 'generate_token.groovy.j2') }}"
+
+- name: Execute token-generation script via Jenkins Script Console
+  uri:
+    url: "{{ jenkins_url }}/scriptText"
+    method: POST
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_token }}"
+    force_basic_auth: true
+    body_format: form-urlencoded
+    body:
+      script: "{{ _token_script }}"
+    status_code: 200
+    return_content: true
+  register: _token_script_result
+  no_log: true   # response contains the plaintext token — keep it out of the log
+
+- name: Fail if the script itself reported an error
+  fail:
+    msg: "Token generation script failed — check Script Console permissions for {{ jenkins_admin_user }}"
+  when: "'RESULT=SUCCESS' not in _token_script_result.content"
+
+- name: Extract generated token into a fact for later phases
+  set_fact:
+    jenkins_monitor_api_token: "{{ _token_script_result.content | regex_search('TOKEN_VALUE=(.+)', '\\1') | first }}"
+  no_log: true
+
+- name: Confirm token was generated (value itself is never printed)
+  debug:
+    msg: "API token generated for {{ jenkins_monitor_user }} (token name: {{ jenkins_token_name }})"
+
+- name: Persist token to a local file (optional — off by default)
+  copy:
+    content: "{{ jenkins_monitor_api_token }}"
+    dest: "{{ jenkins_token_output_path }}"
+    mode: "0600"
+  when: jenkins_persist_token | bool
+  no_log: true

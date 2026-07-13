@@ -1,0 +1,38 @@
+---
+# ------------------------------------------------------------------
+# Jenkins connection (admin credentials — used only for Script Console
+# calls to generate the token and assign roles; never used for the
+# actual monitoring account's day-to-day API calls)
+# ------------------------------------------------------------------
+jenkins_url: "https://jenkins.internal"
+jenkins_admin_user: "admin"
+jenkins_admin_token: "{{ vault_jenkins_admin_token }}"
+
+# ------------------------------------------------------------------
+# Monitoring service account
+# ------------------------------------------------------------------
+jenkins_monitor_user: "monitor-svc"
+jenkins_token_name: "monitoring-token"
+
+# Where to persist the generated token locally (vault-encrypt this
+# file yourself, or better: push straight into your secrets manager
+# in a follow-up task instead of writing to disk)
+jenkins_persist_token: false
+jenkins_token_output_path: "/tmp/{{ jenkins_monitor_user }}_token.txt"
+
+# ------------------------------------------------------------------
+# Role Strategy plugin — role names/pattern to create & bind
+# ------------------------------------------------------------------
+jenkins_global_role_name: "monitoring-global-read"
+jenkins_item_role_name: "monitoring-readonly"
+jenkins_item_role_pattern: ".*"   # narrow this (e.g. "^infra/.*") if you want scoped, not instance-wide, read
+
+# ------------------------------------------------------------------
+# Phase toggles — flip any of these off to re-run only part of the role
+# ------------------------------------------------------------------
+jenkins_generate_token: true
+jenkins_assign_permissions: true
+jenkins_validate_access: true
+
+# Folder-recursion depth used by job discovery during validation
+jenkins_discovery_tree: "jobs[name,url,jobs[name,url,jobs[name,url]]]"

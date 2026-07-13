@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: jenkins_monitor_svc_setup
+  description: >
+    Generates a Jenkins API token for a monitoring service account,
+    binds it to a read-only Role Strategy role (global + item scope),
+    and validates end-to-end that read works and write is blocked.
+  min_ansible_version: "2.14"
+
+dependencies: []
