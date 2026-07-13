@@ -164,3 +164,67 @@ pipeline {
         }
     }
 }
+
+
+import jenkins.model.*
+import com.michelin.cio.hudson.plugins.rolestrategy.*
+import hudson.security.Permission
+import hudson.model.Hudson
+
+def instance = Jenkins.instance
+def authStrategy = instance.getAuthorizationStrategy()
+
+if (!(authStrategy instanceof RoleBasedAuthorizationStrategy)) {
+    println "ERROR: Instance is not using RoleBasedAuthorizationStrategy. Current: ${authStrategy.class.name}"
+    return
+}
+
+def rbas = (RoleBasedAuthorizationStrategy) authStrategy
+
+// ---- 1. Create/update the Global role: ensure Overall/Read exists ----
+def globalRoleMap = rbas.getRoleMap(RoleBasedAuthorizationStrategy.GLOBAL)
+def existingGlobalRole = globalRoleMap.getRole("monitoring-global-read")
+
+if (existingGlobalRole == null) {
+    def globalPermissions = [Hudson.READ] as Set
+    def newGlobalRole = new Role("monitoring-global-read", globalPermissions)
+    globalRoleMap.addRole(newGlobalRole)
+    println "Created global role: monitoring-global-read"
+} else {
+    println "Global role monitoring-global-read already exists"
+}
+
+// Assign user to global role
+globalRoleMap.assignRole(globalRoleMap.getRole("monitoring-global-read"), "monitor-svc")
+println "Assigned monitor-svc to global role monitoring-global-read"
+
+// ---- 2. Create/update the Item (project) role: Job/Read across all jobs ----
+def itemRoleMap = rbas.getRoleMap(RoleBasedAuthorizationStrategy.PROJECT)
+def existingItemRole = itemRoleMap.getRole("monitoring-readonly")
+
+def jobReadPerm = hudson.model.Item.READ
+def jobWorkspacePerm = hudson.model.Item.WORKSPACE
+def jobConfigurePerm = null // deliberately NOT granting configure/build
+
+def itemPermissions = [jobReadPerm] as Set
+
+if (existingItemRole == null) {
+    def newItemRole = new Role("monitoring-readonly", ".*", itemPermissions)
+    itemRoleMap.addRole(newItemRole)
+    println "Created item role: monitoring-readonly with pattern '.*'"
+} else {
+    println "Item role monitoring-readonly already exists with pattern: ${existingItemRole.getPattern()}"
+}
+
+// Assign user to item role
+itemRoleMap.assignRole(itemRoleMap.getRole("monitoring-readonly"), "monitor-svc")
+println "Assigned monitor-svc to item role monitoring-readonly"
+
+// ---- 3. Persist changes ----
+instance.save()
+println "Configuration saved."
+
+// ---- 4. Verify assignment ----
+println "\n--- Verification ---"
+println "Global roles for monitor-svc: " + globalRoleMap.getRolesForSid("monitor-svc", true)*.name
+println "Item roles for monitor-svc: " + itemRoleMap.getRolesForSid("monitor-svc", true)*.name
