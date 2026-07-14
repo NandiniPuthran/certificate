@@ -1,4 +1,19 @@
 ---
+- name: Ensure all default fallback vars are defined and non-empty
+  ansible.builtin.assert:
+    that:
+      - pdu_active_default_delay is defined
+      - pdu_active_default_delay | string | length > 0
+      - pdu_unused_delay is defined
+      - pdu_unused_delay | string | length > 0
+      - pdu_active_startup_state is defined
+      - pdu_active_startup_state | string | length > 0
+      - pdu_unused_startup_state is defined
+      - pdu_unused_startup_state | string | length > 0
+    fail_msg: >-
+      One or more fallback default vars (pdu_active_default_delay,
+      pdu_unused_delay, pdu_active_startup_state, pdu_unused_startup_state)
+      is undefined or empty. Fix this in group_vars before continuing.
 # Runs against the "pdus" inventory group. Each PDU's host_vars define:
 #   pdu_outlet_count: 42
 #   outlet: [{id, name, delay}, ...]   <- your existing var, unchanged
