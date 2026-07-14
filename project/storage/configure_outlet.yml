@@ -1,5 +1,24 @@
 ---
-
+- name: Ensure every outlet entry defines id, name, and delay
+  ansible.builtin.assert:
+    that:
+      - "'id' in item"
+      - item.id is defined
+      - item.id | string | length > 0
+      - "'name' in item"
+      - item.name is defined
+      - item.name | string | length > 0
+      - "'delay' in item"
+      - item.delay is defined
+      - item.delay | string | length > 0
+    fail_msg: >-
+      Outlet entry {{ item }} in {{ inventory_hostname }}'s outlet list is
+      missing (or has empty) id, name, or delay. All three are mandatory —
+      add the missing field(s) in host_vars.
+    success_msg: "Outlet {{ item.id | default('unknown') }} has all mandatory fields"
+  loop: "{{ outlet | default([]) }}"
+  loop_control:
+    label: "outlet {{ item.id | default('unknown') }}"
 - name: Ensure every configured outlet explicitly defines a delay
   ansible.builtin.assert:
     that:
