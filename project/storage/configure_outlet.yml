@@ -1,4 +1,19 @@
 ---
+
+- name: Ensure every configured outlet explicitly defines a delay
+  ansible.builtin.assert:
+    that:
+      - "'delay' in item.1"
+      - item.1.delay is defined
+      - item.1.delay | string | length > 0
+    fail_msg: >-
+      Outlet id {{ item.0 }} ({{ item.1.name | default('unnamed') }}) in
+      {{ inventory_hostname }}'s outlet list is missing a delay value.
+      Add 'delay:' explicitly — this role does not allow relying on the
+      active-outlet default for this PDU.
+  loop: "{{ pdu_outlet_by_id | dict2items(key_name='0', value_name='1') }}"
+  loop_control:
+    label: "outlet {{ item.0 }}"
 - name: Ensure all default fallback vars are defined and non-empty
   ansible.builtin.assert:
     that:
