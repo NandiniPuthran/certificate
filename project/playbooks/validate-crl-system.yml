@@ -23,6 +23,35 @@
         - debug
 
 ---
+---
+# cert_directory_tracking â€” defaults
+#
+# /data/certificate/<hostname>/ lives on a CENTRAL server (cert_repo_server),
+# holding one subfolder per host with that host's cert, csr, and key.
+# certmonger can only track files that physically exist on the host it's
+# running on, using that host's own keytab - so this role has to pull
+# each host's files off the central server and push them to that host
+# before start-tracking can run locally.
+
+cert_repo_server: ""              # FQDN of the server holding /data/certificate
+cert_repo_root: /data/certificate
+
+# Filename patterns used to identify each file type inside a host's
+# subfolder - adjust to match your actual naming convention.
+cert_file_pattern: "*.crt"
+csr_file_pattern: "*.csr"
+key_file_pattern: "*.key"
+
+# Where files land on the target host. Defaults to mirroring the same
+# per-host subfolder layout locally.
+cert_dest_root: /data/certificate
+
+target_realm: ""                   # e.g. EXAMPLE.COM
+
+# Local staging area on the Ansible controller used to relay files from
+# cert_repo_server to each target host (fetch, then copy).
+controller_staging_dir: /tmp/cert_directory_tracking_staging
+
 # Runs per-target-host (hosts: cert_tracking_targets in the second play -
 # see README.md). inventory_hostname must match the folder name under
 # cert_repo_root exactly, since discover.yml derived it from that folder.
