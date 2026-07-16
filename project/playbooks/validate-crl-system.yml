@@ -21,3 +21,99 @@
       tags:
         - validation
         - debug
+
+---
+# Runs per-target-host (hosts: cert_tracking_targets in the second play -
+# see README.md). inventory_hostname must match the folder name under
+# cert_repo_root exactly, since discover.yml derived it from that folder.
+
+- name: Set this host's source folder on the repo server
+  ansible.builtin.set_fact:
+    host_source_dir: "{{ cert_repo_root }}/{{ inventory_hostname }}"
+    host_dest_dir: "{{ cert_dest_root }}/{{ inventory_hostname }}"
+
+- name: Find this host's cert/csr/key files on the repo server
+  ansible.builtin.find:
+    paths: "{{ host_source_dir }}"
+    patterns:
+      - "{{ cert_file_pattern }}"
+      - "{{ csr_file_pattern }}"
+      - "{{ key_file_pattern }}"
+  delegate_to: "{{ cert_repo_server }}"
+  register: found_files
+
+- name: Fail clearly if any of cert/csr/key is missing on the repo server
+  ansible.builtin.assert:
+    that: found_files.files | length >= 2   # csr is optional post-issuance; cert+key are not
+    fail_msg: >-
+      Expected cert/csr/key under {{ host_source_dir }} on
+      {{ cert_repo_server }}, found: {{ found_files.files | map(attribute='path') | list }}
+
+- name: Identify cert/csr/key paths by pattern
+  ansible.builtin.set_fact:
+    src_cert: "{{ (found_files.files | selectattr('path', 'match', '.*' + cert_file_pattern.replace('*','.*') + '$') | map(attribute='path') | list | first) | default('') }}"
+    src_csr: "{{ (found_files.files | selectattr('path', 'match', '.*' + csr_file_pattern.replace('*','.*') + '$') | map(attribute='path') | list | first) | default('') }}"
+    src_key: "{{ (found_files.files | selectattr('path', 'match', '.*' + key_file_pattern.replace('*','.*') + '$') | map(attribute='path') | list | first) | default('') }}"
+
+- name: Fail if cert or key specifically wasn't found (csr is not required to start tracking)
+  ansible.builtin.assert:
+    that:
+      - src_cert | length > 0
+      - src_key | length > 0
+    fail_msg: "Could not identify cert and/or key file under {{ host_source_dir }} using the configured patterns."
+
+- name: Ensure destination directory exists on the target host
+  ansible.builtin.file:
+    path: "{{ host_dest_dir }}"
+    state: directory
+    mode: "0750"
+  become: true
+
+- name: Stage cert/key/csr from the repo server to the controller
+  ansible.builtin.fetch:
+    src: "{{ item }}"
+    dest: "{{ controller_staging_dir }}/{{ inventory_hostname }}/"
+    flat: true
+  loop: "{{ [src_cert, src_key] + ([src_csr] if src_csr | length > 0 else []) }}"
+  delegate_to: "{{ cert_repo_server }}"
+
+- name: Push staged files from the controller to the target host
+  ansible.builtin.copy:
+    src: "{{ controller_staging_dir }}/{{ inventory_hostname }}/{{ item | basename }}"
+    dest: "{{ host_dest_dir }}/{{ item | basename }}"
+    mode: "0640"
+  loop: "{{ [src_cert, src_key] + ([src_csr] if src_csr | length > 0 else []) }}"
+  become: true
+
+- name: Compute destination cert/key paths
+  ansible.builtin.set_fact:
+    dest_cert: "{{ host_dest_dir }}/{{ src_cert | basename }}"
+    dest_key: "{{ host_dest_dir }}/{{ src_key | basename }}"
+
+- name: Check whether this cert is already tracked
+  ansible.builtin.command: "getcert list -f {{ dest_cert }}"
+  register: already_tracked
+  changed_when: false
+  failed_when: false
+
+- name: Start tracking (only if not already tracked)
+  ansible.builtin.command: >
+    ipa-getcert start-tracking
+    -f {{ dest_cert }}
+    -k {{ dest_key }}
+    -K host/{{ inventory_hostname }}@{{ target_realm }}
+  when: "'MONITORING' not in already_tracked.stdout"
+  register: start_tracking_result
+
+- name: Verify cert and key are present at the destination
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ dest_cert }}"
+    - "{{ dest_key }}"
+  register: dest_check
+
+- name: Assert both files exist
+  ansible.builtin.assert:
+    that: dest_check.results | map(attribute='stat.exists') | list is all
+    fail_msg: "cert and/or key missing at destination after copy - tracking would fail."
