@@ -2,6 +2,40 @@
 # Full system validation
 
 ---
+---
+# Run this ONCE, early in the playbook, targeting a single control point
+# (e.g. `hosts: localhost` or the repo server itself) - NOT the fleet of
+# client hosts. It builds a dynamic group from what's actually present
+# on cert_repo_server, so a stale/incomplete static "certificate" group
+# in inventory can't cause a host to be silently skipped or a directory
+# to be silently missed.
+#
+# See README.md for the two-play pattern this depends on.
+
+- name: List per-host certificate subfolders on the repo server
+  ansible.builtin.find:
+    paths: "{{ cert_repo_root }}"
+    file_type: directory
+    depth: 1
+  delegate_to: "{{ cert_repo_server }}"
+  register: cert_dirs
+
+- name: Fail loudly if the repo root has no per-host subfolders
+  ansible.builtin.assert:
+    that: cert_dirs.files | length > 0
+    fail_msg: "No subfolders found under {{ cert_repo_root }} on {{ cert_repo_server }}."
+
+- name: Add each discovered folder as a dynamic inventory host
+  ansible.builtin.add_host:
+    name: "{{ item.path | basename }}"
+    groups: cert_tracking_targets
+  loop: "{{ cert_dirs.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
+- name: Report discovered targets
+  ansible.builtin.debug:
+    msg: "Discovered {{ cert_dirs.files | length }} host folder(s): {{ cert_dirs.files | map(attribute='path') | map('basename') | list }}"
 
 - name: "Validate CRL System"
   hosts: all
