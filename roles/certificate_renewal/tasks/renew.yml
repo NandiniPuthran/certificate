@@ -175,16 +175,6 @@
 
 
 ---
-# Runs on the IT server. Deploys the revoke hook once, then starts
-# certmonger tracking per managed certificate with that hook wired in
-# as the post-renewal command.
-#
-# Reminder: certmonger's ipa-submit authenticates using the IT server's
-# OWN default keytab (/etc/krb5.keytab) - the -K principal below is who
-# the cert is being requested FOR, not who's authenticating. This only
-# succeeds if that principal already has the IT server listed as a
-# managing host (ipa_service_managed_host role, managing_hosts including
-# {{ it_server }}).
 
 - name: Ensure the cert_manager bin directory exists
   ansible.builtin.file:
