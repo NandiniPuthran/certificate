@@ -172,3 +172,93 @@
 # ─── 10. Validate deployed certificate ───────────────────────────────────────
 - name: Validate deployed certificate
   ansible.builtin.include_tasks: validate_renewal.yml
+
+
+---
+# Runs on the IT server. Deploys the revoke hook once, then starts
+# certmonger tracking per managed certificate with that hook wired in
+# as the post-renewal command.
+#
+# Reminder: certmonger's ipa-submit authenticates using the IT server's
+# OWN default keytab (/etc/krb5.keytab) - the -K principal below is who
+# the cert is being requested FOR, not who's authenticating. This only
+# succeeds if that principal already has the IT server listed as a
+# managing host (ipa_service_managed_host role, managing_hosts including
+# {{ it_server }}).
+
+- name: Ensure the cert_manager bin directory exists
+  ansible.builtin.file:
+    path: "{{ revoke_script_path | dirname }}"
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Deploy the revoke-superseded hook script
+  ansible.builtin.copy:
+    src: revoke_superseded.sh
+    dest: "{{ revoke_script_path }}"
+    mode: "0750"
+    owner: root
+    group: root
+  become: true
+
+- name: Ensure the revoke log directory exists
+  ansible.builtin.file:
+    path: "{{ revoke_log_path | dirname }}"
+    state: directory
+    mode: "0750"
+  become: true
+
+- name: Confirm revoke_principal is set before tracking anything
+  ansible.builtin.assert:
+    that: revoke_principal | length > 0
+    fail_msg: >-
+      revoke_principal is unset - the post-renewal hook would kinit
+      with an empty principal and every revoke would fail, silently
+      logged only to revoke.log. Set it explicitly before running this.
+
+# Single flat loop over managed_certificates throughout - each item
+# here is always the original dict (name, principal, cert_path, ...),
+# never a nested result object, so downstream references stay
+# item.<field> everywhere below.
+
+- name: Check tracking status per certificate
+  ansible.builtin.command: "getcert list -f {{ item.cert_path }}"
+  loop: "{{ managed_certificates }}"
+  loop_control:
+    label: "{{ item.name }}"
+    loop_var: item
+  register: tracking_check
+  changed_when: false
+  failed_when: false
+
+- name: Build a name-keyed already-tracked map
+  ansible.builtin.set_fact:
+    already_tracked_map: "{{ dict(managed_certificates | map(attribute='name') | zip(tracking_check.results | map(attribute='stdout') | map('regex_search', 'MONITORING') | map('bool'))) }}"
+
+- name: Start tracking each certificate not already tracked
+  ansible.builtin.command: >
+    ipa-getcert start-tracking
+    -c {{ tracking_ca }}
+    -f {{ item.cert_path }}
+    -k {{ item.key_path }}
+    -K {{ item.principal }}
+    -C "{{ revoke_script_path }} {{ item.cert_path }} {{ item.serial_path }} {{ revoke_keytab_path }} {{ revoke_principal }} {{ revocation_reason }}"
+  loop: "{{ managed_certificates }}"
+  loop_control:
+    label: "{{ item.name }}"
+    loop_var: item
+  when: not already_tracked_map[item.name]
+  become: true
+  register: start_tracking_results
+
+- name: Report tracking outcome
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }}:
+      {{ 'already tracked, skipped' if already_tracked_map[item.name]
+      else 'tracking started' }}
+  loop: "{{ managed_certificates }}"
+  loop_control:
+    label: "{{ item.name }}"
+    loop_var: item
