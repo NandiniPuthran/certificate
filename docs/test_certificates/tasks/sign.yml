@@ -1,0 +1,115 @@
+---
+# Is the certificate really signed by the IPA CA?
+#
+# Issuer DN alone proves nothing — any self-signed CA can call itself
+# "CN=Certificate Authority". Real proof: the chain verifies against a pinned
+# anchor, the AKI points at that CA's key, and IPA confirms it issued the serial.
+
+- name: "TC-SGN-001: IPA CA certificate present and parseable"
+  ansible.builtin.assert:
+    that: not (tc_ca_info.failed | default(true))
+    fail_msg: >-
+      {{ tc_ca_cert }} is missing or unparseable. Nothing on this host can
+      validate a certificate without it.
+    quiet: true
+
+- name: "TC-SGN-002: CA certificate carries basicConstraints CA:TRUE"
+  ansible.builtin.assert:
+    that: (tc_ca_info.basic_constraints | default([]) | select('search', 'CA:TRUE') | list) | length > 0
+    fail_msg: "{{ tc_ca_cert }} is not marked as a CA certificate."
+    quiet: true
+  when: not (tc_ca_info.failed | default(true))
+
+- name: "TC-SGN-003: CA certificate has not expired"
+  ansible.builtin.assert:
+    that: not tc_ca_info.expired
+    fail_msg: "The IPA CA certificate itself expired on {{ tc_ca_info.not_after }}."
+    quiet: true
+  when: not (tc_ca_info.failed | default(true))
+
+- name: "TC-SGN-004: CA fingerprint matches the pinned SHA-256"
+  ansible.builtin.assert:
+    that:
+      - (tc_ca_info.fingerprints.sha256 | replace(':', '') | lower)
+        == (tc_ca_sha256_pin | replace(':', '') | lower)
+    fail_msg: >-
+      The CA on this host is NOT the one you pinned. Expected
+      {{ tc_ca_sha256_pin | replace(':', '') | lower }}, found
+      {{ tc_ca_info.fingerprints.sha256 | replace(':', '') | lower }}.
+    quiet: true
+  when:
+    - tc_ca_sha256_pin | length > 0
+    - not (tc_ca_info.failed | default(true))
+
+- name: "TC-SGN-004: SKIPPED — no CA fingerprint pinned"
+  ansible.builtin.debug:
+    msg: >-
+      tc_ca_sha256_pin is not set, so this test cannot run. Without it, a
+      substituted CA on this host would still pass TC-SGN-005. Set it from:
+      openssl x509 -in /etc/ipa/ca.crt -noout -fingerprint -sha256
+  when: tc_ca_sha256_pin | length == 0
+
+- name: "TC-SGN-005: certificate chains to the CA"
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      openssl verify failed for {{ item.item.cert_path }}:
+      {{ ((item.stdout | default('')) ~ ' ' ~ (item.stderr | default(''))) | trim }}
+    quiet: true
+  loop: "{{ tc_openssl_verify.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+
+- name: "TC-SGN-006: leaf AKI matches the CA subject key identifier"
+  ansible.builtin.assert:
+    that:
+      - (item.authority_key_identifier | default('')) | length > 0
+      - (item.authority_key_identifier | replace(':', '') | lower)
+        == (tc_ca_info.subject_key_identifier | default('') | replace(':', '') | lower)
+    fail_msg: >-
+      The certificate's authorityKeyIdentifier does not point at this CA's
+      subjectKeyIdentifier — it was signed by a different key.
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: not (tc_ca_info.failed | default(true))
+
+- name: "TC-SGN-007: issuer CN is the IPA CA"
+  ansible.builtin.assert:
+    that: item.issuer.commonName == tc_ipa_ca_cn
+    fail_msg: "Issuer CN is '{{ item.issuer.commonName }}', expected '{{ tc_ipa_ca_cn }}'."
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  ignore_errors: true    # WARN severity in the spec — diagnostic only
+
+- name: "TC-SGN-008: IPA has a record of the deployed serial"
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      IPA has no record of serial {{ item.item.serial_number }}
+      ({{ item.item.item.name }}). This is an orphan — issued outside IPA, or
+      left behind by a CA that has since been replaced.
+    quiet: true
+  loop: "{{ tc_ipa_show.results | default([]) }}"
+  loop_control: {label: "{{ item.item.item.name | default('skipped') }}"}
+  when:
+    - tc_online | bool
+    - item.item is defined
+
+- name: "TC-SGN-009: on-disk fingerprint matches the IPA record"
+  ansible.builtin.assert:
+    that:
+      - ((((item.stdout | default('')
+            | regex_findall('(?im)^[ \t]*sha256[_ ]fingerprint[ \t]*:[ \t]*(.+?)[ \t]*$')) + [''])
+          | first | replace(':', '') | lower) in ['',
+            (item.item.fingerprints.sha256 | replace(':', '') | lower)])
+    fail_msg: >-
+      Serial {{ item.item.serial_number }} matches an IPA record, but the SHA-256
+      fingerprints differ. The certificate on disk is not the one IPA issued.
+    quiet: true
+  loop: "{{ tc_ipa_show.results | default([]) }}"
+  loop_control: {label: "{{ item.item.item.name | default('skipped') }}"}
+  when:
+    - tc_online | bool
+    - item.item is defined
+    - item.rc == 0

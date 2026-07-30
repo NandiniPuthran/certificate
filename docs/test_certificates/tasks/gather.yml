@@ -1,0 +1,180 @@
+---
+# Collects everything the test files need, once. No assertions here except the
+# guard that stops a host with nothing declared from reporting a clean run.
+
+- name: Check a certificate inventory was declared for this host
+  ansible.builtin.assert:
+    that: tc_certs | length > 0
+    fail_msg: >-
+      No tc_certs declared for {{ inventory_hostname }}. A host with nothing to
+      check must not report a clean run — define it in group_vars.
+    quiet: true
+
+- name: Stat certificates
+  ansible.builtin.stat:
+    path: "{{ item.cert_path }}"
+    follow: true
+  become: true
+  loop: "{{ tc_certs }}"
+  loop_control: {label: "{{ item.name }}"}
+  register: tc_cert_stat
+
+- name: Stat private keys
+  ansible.builtin.stat:
+    path: "{{ item.key_path }}"
+  become: true
+  loop: "{{ tc_certs }}"
+  loop_control: {label: "{{ item.name }}"}
+  register: tc_key_stat
+
+- name: Select the certificates that exist
+  ansible.builtin.set_fact:
+    tc_present: "{{ tc_cert_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+
+- name: Read certificates
+  community.crypto.x509_certificate_info:
+    path: "{{ item.cert_path }}"
+    valid_at:
+      now: "+0s"
+      horizon: "+{{ tc_renewal_threshold_days }}d"
+  become: true
+  loop: "{{ tc_present }}"
+  loop_control: {label: "{{ item.name }}"}
+  register: tc_cert_info
+
+- name: Read private keys
+  community.crypto.openssl_privatekey_info:
+    path: "{{ item.key_path }}"
+  become: true
+  loop: "{{ tc_present }}"
+  loop_control: {label: "{{ item.name }}"}
+  register: tc_key_info
+  failed_when: false
+
+- name: Read the IPA CA certificate
+  community.crypto.x509_certificate_info:
+    path: "{{ tc_ca_cert }}"
+  become: true
+  register: tc_ca_info
+  failed_when: false
+
+# item.0 = certificate, item.1 = key — lets the test files check both at once.
+- name: Pair certificates with their keys
+  ansible.builtin.set_fact:
+    tc_pairs: "{{ tc_cert_info.results | zip(tc_key_info.results) | list }}"
+
+- name: Verify each certificate against the CA
+  ansible.builtin.command:
+    argv: [openssl, verify, -CAfile, "{{ tc_ca_cert }}", "{{ item.cert_path }}"]
+  become: true
+  changed_when: false
+  failed_when: false
+  loop: "{{ tc_present }}"
+  loop_control: {label: "{{ item.name }}"}
+  register: tc_openssl_verify
+
+- name: Look for leftover CSR and key material in scratch directories
+  ansible.builtin.find:
+    paths: "{{ tc_scratch_dirs }}"
+    patterns: ['*.csr', '*.key', '*.pem']
+    file_type: file
+  become: true
+  register: tc_leftovers
+
+- name: Read the certificate each TLS listener is serving
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      openssl s_client -connect 127.0.0.1:{{ item.item.tls_port }}
+      -servername {{ item.item.expected_cn | default(ansible_facts['fqdn']) }}
+      </dev/null 2>/dev/null | openssl x509 -noout -serial
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  failed_when: false
+  loop: "{{ tc_cert_info.results | selectattr('item.tls_port', 'defined') | list }}"
+  loop_control: {label: "{{ item.item.name }}:{{ item.item.tls_port }}"}
+  register: tc_wire
+
+# ── Delegated to ITserver: fleet hosts cannot talk to IPA themselves ─────────
+
+- name: Authenticate to IPA on ITserver
+  ansible.builtin.command:
+    argv: [kinit, -k, -t, "{{ tc_krb5_keytab }}"]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tc_kinit
+  when: tc_query_ipa | bool
+
+- name: Set a flag for whether delegated queries are usable
+  ansible.builtin.set_fact:
+    tc_online: "{{ (tc_query_ipa | bool) and ((tc_kinit.rc | default(1)) == 0) }}"
+
+- name: Ask IPA about each deployed serial
+  ansible.builtin.command:
+    argv: [ipa, cert-show, "{{ item.serial_number }}", --all, --raw]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  changed_when: false
+  failed_when: false
+  throttle: 8
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }} serial={{ item.serial_number }}"}
+  register: tc_ipa_show
+  when: tc_online | bool
+
+- name: Ask IPA for the host entry
+  ansible.builtin.command:
+    argv: [ipa, host-show, "{{ ansible_facts['fqdn'] }}"]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  changed_when: false
+  failed_when: false
+  throttle: 8
+  register: tc_ipa_host_show
+  when: tc_online | bool
+
+- name: Ask IPA for every certificate it holds for this subject
+  ansible.builtin.command:
+    argv: [ipa, cert-find, "--subject={{ ansible_facts['fqdn'] }}", --sizelimit=0, --all, --raw]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  changed_when: false
+  failed_when: false
+  throttle: 8
+  register: tc_ipa_find
+  when: tc_online | bool
+
+- name: Read certmonger tracking on ITserver
+  ansible.builtin.command:
+    argv: [getcert, list]
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tc_getcert
+  when: tc_query_ipa | bool
+
+- name: Read the certificate profile
+  ansible.builtin.command:
+    argv: [ipa, certprofile-show, "{{ tc_profile_id }}"]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tc_profile_show
+  when: tc_online | bool
+
+- name: Find the certmonger request covering this host
+  ansible.builtin.set_fact:
+    tc_cm: >-
+      {{ ((tc_getcert.stdout | default('')).split('Request ID ')
+          | select('search', ansible_facts['fqdn'] | regex_escape)
+          | list | first | default('')) }}

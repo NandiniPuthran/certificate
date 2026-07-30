@@ -1,0 +1,70 @@
+---
+# Is renewal healthy?
+#
+# This suite cannot force a renewal — cert_renew lives in another repository. So
+# it tests the two things that tell you renewal is working: the certificate is
+# not drifting toward expiry, and certmonger on ITserver is actually wired up to
+# renew it and push the result out.
+
+- name: "TC-REN-101: certificate is outside the renewal window"
+  ansible.builtin.assert:
+    that: item.valid_at.horizon
+    fail_msg: >-
+      {{ item.item.name }} expires on {{ item.not_after }}, within
+      {{ tc_renewal_threshold_days }} days. Renewal should already have run — it
+      has either not fired or is failing.
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+
+- name: "TC-REN-102: a certmonger request covers this host"
+  ansible.builtin.assert:
+    that: (tc_cm | length) > 0
+    fail_msg: >-
+      No certmonger request on {{ tc_ipa_host }} mentions
+      {{ ansible_facts['fqdn'] }}. Nothing will ever renew this host — the
+      certificate will simply expire, with no warning.
+    quiet: true
+  when: tc_query_ipa | bool
+
+- name: "TC-REN-103: the tracking request is MONITORING"
+  ansible.builtin.assert:
+    that:
+      - (((tc_cm | regex_findall('(?im)^[ \t]*status[ \t]*:[ \t]*(\S+)')) + ['']) | first | upper)
+        == 'MONITORING'
+    fail_msg: >-
+      certmonger status is
+      '{{ ((tc_cm | regex_findall('(?im)^[ \t]*status[ \t]*:[ \t]*(\S+)')) + ['none']) | first }}',
+      expected MONITORING.
+    quiet: true
+  when:
+    - tc_query_ipa | bool
+    - (tc_cm | length) > 0
+
+- name: "TC-REN-104: the tracking request is not stuck"
+  ansible.builtin.assert:
+    that:
+      - (((tc_cm | regex_findall('(?im)^[ \t]*stuck[ \t]*:[ \t]*(\S+)')) + ['yes']) | first | lower)
+        == 'no'
+    fail_msg: >-
+      The certmonger request is stuck. Renewal will not complete without someone
+      intervening on {{ tc_ipa_host }}.
+    quiet: true
+  when:
+    - tc_query_ipa | bool
+    - (tc_cm | length) > 0
+
+# The silent killer: certmonger renews on ITserver and never pushes the result
+# to the fleet host. Nothing errors. The host expires 30 days later.
+- name: "TC-REN-105: the tracking request has a post-save command"
+  ansible.builtin.assert:
+    that:
+      - (((tc_cm | regex_findall('(?im)^[ \t]*post-save command[ \t]*:[ \t]*(.+?)[ \t]*$')) + [''])
+         | first | trim | length) > 0
+    fail_msg: >-
+      The tracking request has no post-save command. certmonger will renew the
+      certificate on {{ tc_ipa_host }} and never push it out to this host.
+    quiet: true
+  when:
+    - tc_query_ipa | bool
+    - (tc_cm | length) > 0

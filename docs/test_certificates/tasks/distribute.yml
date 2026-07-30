@@ -1,0 +1,96 @@
+---
+# Did cert_distribute land the files correctly — and is the service actually
+# using them?
+
+- name: "TC-DST-001: certificate present at the target path"
+  ansible.builtin.assert:
+    that: item.stat.exists
+    fail_msg: "{{ item.item.cert_path }} is missing on {{ inventory_hostname }}."
+    quiet: true
+  loop: "{{ tc_cert_stat.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+
+- name: "TC-DST-003: certificate owner and group correct"
+  ansible.builtin.assert:
+    that:
+      - (item.item.owner is not defined) or (item.stat.pw_name == item.item.owner)
+      - (item.item.group is not defined) or (item.stat.gr_name == item.item.group)
+    fail_msg: >-
+      {{ item.item.cert_path }} is owned by
+      {{ item.stat.pw_name }}:{{ item.stat.gr_name }}, expected
+      {{ item.item.owner | default('?') }}:{{ item.item.group | default('?') }}.
+    quiet: true
+  loop: "{{ tc_cert_stat.results | selectattr('stat.exists') | list }}"
+  loop_control: {label: "{{ item.item.name }}"}
+
+- name: "TC-DST-004: certificate mode correct"
+  ansible.builtin.assert:
+    that: item.stat.mode == item.item.cert_mode
+    fail_msg: "{{ item.item.cert_path }} is mode {{ item.stat.mode }}, expected {{ item.item.cert_mode }}."
+    quiet: true
+  loop: "{{ tc_cert_stat.results | selectattr('stat.exists') | list }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: item.item.cert_mode is defined
+
+- name: "TC-DST-005: private key mode correct"
+  ansible.builtin.assert:
+    that: item.stat.mode == item.item.key_mode
+    fail_msg: "{{ item.item.key_path }} is mode {{ item.stat.mode }}, expected {{ item.item.key_mode }}."
+    quiet: true
+  loop: "{{ tc_key_stat.results | selectattr('stat.exists') | list }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: item.item.key_mode is defined
+
+- name: "TC-DST-007: CA bundle distributed to the expected path"
+  ansible.builtin.assert:
+    that: not (tc_ca_info.failed | default(true))
+    fail_msg: "{{ tc_ca_cert }} is missing or unreadable on {{ inventory_hostname }}."
+    quiet: true
+
+- name: "TC-DST-008: the TLS listener is reachable"
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - (item.stdout | default('')) | length > 0
+    fail_msg: >-
+      Could not complete a TLS handshake on 127.0.0.1:{{ item.item.item.tls_port }}
+      ({{ item.item.item.service | default('service') }}). The service may not have
+      started after the certificate was placed.
+    quiet: true
+  loop: "{{ tc_wire.results | default([]) }}"
+  loop_control: {label: "{{ item.item.item.name | default('skipped') }}"}
+  when: item.item is defined
+
+# The strongest test here. A certificate can be byte-perfect on disk while the
+# service still holds the old one in memory.
+- name: "TC-DST-009: the served serial matches the serial on disk"
+  ansible.builtin.assert:
+    that:
+      - ((item.stdout | trim | regex_replace('^serial=', '') | lower) | regex_replace('^0+', ''))
+        == (('%X' | format(item.item.serial_number)) | lower | regex_replace('^0+', ''))
+    fail_msg: >-
+      {{ item.item.item.service | default('The service') }} is serving serial
+      {{ item.stdout | trim | regex_replace('^serial=', '') | lower }} but the disk holds
+      {{ ('%X' | format(item.item.serial_number)) | lower }}. The certificate was
+      replaced and the service was never reloaded.
+    quiet: true
+  loop: "{{ tc_wire.results | default([]) }}"
+  loop_control: {label: "{{ item.item.item.name | default('skipped') }}"}
+  when:
+    - item.item is defined
+    - item.rc == 0
+
+- name: "TC-DST-011: host holds the newest serial IPA has issued for it"
+  ansible.builtin.assert:
+    that:
+      - (tc_ipa_find.stdout | default('')
+         | regex_findall('(?im)^[ \t]*serial[_ ]number[ \t]*:[ \t]*([0-9]+)[ \t]*$')) | length == 0
+        or ((tc_cert_info.results | map(attribute='serial_number') | map('int') | list)
+            | intersect([(tc_ipa_find.stdout
+                          | regex_findall('(?im)^[ \t]*serial[_ ]number[ \t]*:[ \t]*([0-9]+)[ \t]*$'))
+                         | map('int') | max])) | length > 0
+    fail_msg: >-
+      IPA has issued a newer certificate for {{ ansible_facts['fqdn'] }} than this
+      host is holding. Issuance succeeded and distribution did not.
+    quiet: true
+  when: tc_online | bool

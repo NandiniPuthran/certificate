@@ -1,0 +1,207 @@
+---
+# ITserver must be enrolled. Fleet hosts must not be — an unexpectedly enrolled
+# fleet host means it is being managed two ways at once, so both are tested.
+
+- name: Work out which posture this host should have
+  ansible.builtin.set_fact:
+    tc_is_itserver: "{{ inventory_hostname in (groups['itserver'] | default([])) }}"
+
+- name: Gather package facts
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Look for the IPA client config
+  ansible.builtin.stat: {path: /etc/ipa/default.conf}
+  become: true
+  register: tc_ipa_conf
+
+- name: Read the IPA client config
+  ansible.builtin.slurp: {src: /etc/ipa/default.conf}
+  become: true
+  register: tc_ipa_conf_raw
+  when: tc_ipa_conf.stat.exists
+
+- name: List keytab principals
+  ansible.builtin.command:
+    argv: [klist, -k, "{{ tc_krb5_keytab }}"]
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tc_klist
+
+- name: Read certmonger service state
+  ansible.builtin.command:
+    argv: [systemctl, show, certmonger.service, -p, ActiveState, -p, UnitFileState]
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tc_certmonger
+
+- name: Read time sync state
+  ansible.builtin.command:
+    argv: [timedatectl, show, -p, NTPSynchronized, -p, NTP, --value]
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tc_timesync
+
+- name: Stat the automation keytab
+  ansible.builtin.stat: {path: "{{ tc_automation_keytab }}"}
+  become: true
+  register: tc_auto_keytab
+  when: tc_automation_keytab | length > 0
+
+- name: Summarise the evidence
+  ansible.builtin.set_fact:
+    tc_pkg: >-
+      {{ (ansible_facts.packages | default({}) | list | intersect(tc_ipaclient_packages)) | length > 0 }}
+    tc_realm: >-
+      {{ (((tc_ipa_conf_raw.content | default('') | b64decode)
+           | regex_findall('(?im)^[ \t]*realm[ \t]*=[ \t]*(\S+)')) + [''])
+         | first | trim }}
+
+# ── ITserver ────────────────────────────────────────────────────────────────
+
+- name: "TC-IPA-001: IPA client package installed"
+  ansible.builtin.assert:
+    that: tc_pkg | bool
+    fail_msg: >-
+      None of {{ tc_ipaclient_packages | join('/') }} is installed. ITserver
+      cannot issue or track certificates without the IPA client.
+    quiet: true
+  when: tc_is_itserver | bool
+
+- name: "TC-IPA-002: /etc/ipa/default.conf present and parseable"
+  ansible.builtin.assert:
+    that:
+      - tc_ipa_conf.stat.exists
+      - (tc_ipa_conf_raw.content | default('') | b64decode) | length > 0
+    fail_msg: "/etc/ipa/default.conf is missing or empty — the host is not enrolled."
+    quiet: true
+  when: tc_is_itserver | bool
+
+- name: "TC-IPA-003: enrolled realm matches expected"
+  ansible.builtin.assert:
+    that: (tc_realm | upper) == (tc_ipa_realm | upper)
+    fail_msg: "Enrolled realm is '{{ tc_realm }}', expected '{{ tc_ipa_realm }}'."
+    quiet: true
+  when: tc_is_itserver | bool
+
+- name: "TC-IPA-004: host principal present in the keytab"
+  ansible.builtin.assert:
+    that: "'host/' in (tc_klist.stdout | default(''))"
+    fail_msg: >-
+      No host/ principal in {{ tc_krb5_keytab }}. Every delegated IPA query in
+      this suite runs as the host principal, so all of them will fail.
+    quiet: true
+  when: tc_is_itserver | bool
+
+- name: "TC-IPA-005: kinit -k succeeds"
+  ansible.builtin.assert:
+    that: (tc_kinit.rc | default(1)) == 0
+    fail_msg: >-
+      kinit -k failed on ITserver: {{ (tc_kinit.stderr | default('')) | trim }}.
+      Nothing authoritative can be verified while this fails.
+    quiet: true
+  when:
+    - tc_is_itserver | bool
+    - tc_query_ipa | bool
+
+- name: "TC-IPA-006: ipa CLI can reach the CA"
+  ansible.builtin.command:
+    argv: [ipa, ca-show, ipa]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tc_ca_show
+  when:
+    - tc_is_itserver | bool
+    - tc_online | bool
+
+- name: "TC-IPA-006: ipa ca-show succeeds"
+  ansible.builtin.assert:
+    that: tc_ca_show.rc == 0
+    fail_msg: "ipa ca-show failed: {{ (tc_ca_show.stderr | default('')) | trim }}"
+    quiet: true
+  when:
+    - tc_is_itserver | bool
+    - tc_online | bool
+
+- name: "TC-IPA-007: certmonger is active"
+  ansible.builtin.assert:
+    that: "'ActiveState=active' in (tc_certmonger.stdout | default(''))"
+    fail_msg: >-
+      certmonger is not running. Nothing will renew the fleet's certificates.
+    quiet: true
+  when: tc_is_itserver | bool
+
+- name: "TC-IPA-008: certmonger is enabled (survives reboot)"
+  ansible.builtin.assert:
+    that: "'UnitFileState=enabled' in (tc_certmonger.stdout | default(''))"
+    fail_msg: >-
+      certmonger is running but not enabled — renewal stops silently at the next
+      reboot of ITserver.
+    quiet: true
+  when: tc_is_itserver | bool
+
+- name: "TC-IPA-009: time is synchronised"
+  ansible.builtin.assert:
+    that: "'yes' in (tc_timesync.stdout | default('') | lower)"
+    fail_msg: >-
+      Time is not synchronised. Kerberos rejects a skew above ~5 minutes, which
+      shows up as random unexplained authentication failures.
+    quiet: true
+  when: tc_is_itserver | bool
+
+- name: "TC-IPA-010: automation keytab exists"
+  ansible.builtin.assert:
+    that: tc_auto_keytab.stat.exists
+    fail_msg: "{{ tc_automation_keytab }} is missing."
+    quiet: true
+  when:
+    - tc_is_itserver | bool
+    - tc_automation_keytab | length > 0
+
+- name: "TC-IPA-011: automation keytab is mode 0600, owned by root"
+  ansible.builtin.assert:
+    that:
+      - tc_auto_keytab.stat.mode == '0600'
+      - tc_auto_keytab.stat.pw_name == 'root'
+    fail_msg: >-
+      {{ tc_automation_keytab }} is {{ tc_auto_keytab.stat.mode }} owned by
+      {{ tc_auto_keytab.stat.pw_name }}, expected 0600 root. A readable keytab is
+      a credential leak.
+    quiet: true
+  when:
+    - tc_is_itserver | bool
+    - tc_automation_keytab | length > 0
+    - tc_auto_keytab.stat.exists
+
+# ── Fleet hosts: the inverse ────────────────────────────────────────────────
+
+- name: "TC-IPA-101: fleet host has no IPA client package"
+  ansible.builtin.assert:
+    that: not (tc_pkg | bool)
+    fail_msg: >-
+      An IPA client package is installed on {{ inventory_hostname }}, which is
+      managed as a non-IPA host.
+    quiet: true
+  when: not (tc_is_itserver | bool)
+
+- name: "TC-IPA-102: fleet host has no /etc/ipa/default.conf"
+  ansible.builtin.assert:
+    that: not tc_ipa_conf.stat.exists
+    fail_msg: >-
+      /etc/ipa/default.conf exists on {{ inventory_hostname }} — the host appears
+      enrolled but is managed as a non-IPA host.
+    quiet: true
+  when: not (tc_is_itserver | bool)
+
+- name: "TC-IPA-103: fleet host has no Kerberos host principal"
+  ansible.builtin.assert:
+    that: "'host/' not in (tc_klist.stdout | default(''))"
+    fail_msg: "A host/ principal exists on a non-IPA host."
+    quiet: true
+  when: not (tc_is_itserver | bool)
+  ignore_errors: true    # WARN severity in the spec

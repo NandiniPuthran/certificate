@@ -1,0 +1,38 @@
+---
+# Is the IPA certificate profile what we expect?
+#
+# Only two things are checked directly here. The profile's actual effect —
+# validity period, EKUs, SAN handling, key constraints — is verified through the
+# certificates it issues, in TC-GEN-002, 010, 012 and 013. That is simpler than
+# parsing profile config and a stronger test, because it checks what the CA
+# really did rather than what it was configured to do.
+
+- name: "TC-PRF-001: the certificate profile exists in IPA"
+  ansible.builtin.assert:
+    that: tc_profile_show.rc == 0
+    fail_msg: >-
+      IPA has no certificate profile '{{ tc_profile_id }}':
+      {{ (tc_profile_show.stderr | default('')) | trim }}
+    quiet: true
+  when: tc_online | bool
+  run_once: true
+
+# Substituted for the spec's "profile is enabled" — IPA's profile object does
+# not expose an enabled flag through certprofile-show. This property is
+# checkable and matters: with it FALSE, IPA keeps no record of what it issued,
+# and TC-SGN-008 and TC-DST-011 cannot work at all.
+- name: "TC-PRF-002: the profile stores issued certificates"
+  ansible.builtin.assert:
+    that:
+      - (((tc_profile_show.stdout | default('')
+           | regex_findall('(?im)^[ \t]*store issued certificates[ \t]*:[ \t]*(\S+)')) + [''])
+         | first | upper) == 'TRUE'
+    fail_msg: >-
+      Profile '{{ tc_profile_id }}' does not store issued certificates. IPA will
+      keep no record of what it issues, so TC-SGN-008 and TC-DST-011 cannot
+      verify anything.
+    quiet: true
+  when:
+    - tc_online | bool
+    - tc_profile_show.rc == 0
+  run_once: true

@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: test_certificates
+  description: >-
+    Test suite for the FreeIPA certificate lifecycle roles. One task file per
+    area of the test case spec. Read-only — nothing on a target host is created,
+    modified, or deleted.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions: [bullseye, bookworm]
+    - name: Ubuntu
+      versions: [focal, jammy, noble]
+collections:
+  - community.crypto
+dependencies: []

@@ -1,0 +1,37 @@
+find:
+    paths: "{{ ssl_dir}}"
+    patterns: "*.csr"
+    recursive: yes
+register: root_csr_files
+
+find:
+    paths: "{{ ssl_dir}}/hostname"
+    patterns: "*.csr"
+    recursive: yes
+register: hostname_csr_files
+
+set_fact:
+    csr_files: "{{ root_csr_files.files + hostname_csr_files.files }}"
+
+fail:
+    msg: "No CSR files found in {{ ssl_dir }} or {{ ssl_dir }}/hostname"
+    when: csr_files | length == 0
+
+file:
+    path: "{{ item }}"
+    state: directory
+loop: "{{ csr_files | map(attribute='path') | map('dirname') | unique }}"
+delegate_to: it_server
+when: it_server != lookup('pipe', 'hostname')
+
+
+- copy:
+    src: "{{ item.path }}"
+    dest: "{{ item.path }}"
+    remote_src: yes
+loop: "{{ csr_files }}" 
+delegate_to: it_server
+
+- set_fact:
+    host_csr_files: "{{ host_csr_files.files }}"
+    root_csr_files: "{{ root_csr_files.files }}"

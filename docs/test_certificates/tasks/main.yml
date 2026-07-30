@@ -1,0 +1,32 @@
+---
+# One task file per area of the test case spec. Run the lot, or pick one with
+# --tags. Test cases are plain asserts named with their spec ID, so Ansible's
+# own output is the report and the junit callback needs no extra machinery.
+
+- name: Gather state
+  ansible.builtin.include_tasks: gather.yml
+  tags: [always]
+
+- name: TC-IPA — ipaclient prerequisites
+  ansible.builtin.include_tasks: ipaclient.yml
+  tags: [ipaclient]
+
+- name: TC-GEN — certificate generation
+  ansible.builtin.include_tasks: generate.yml
+  tags: [generate]
+
+- name: TC-SGN — signed by IPA
+  ansible.builtin.include_tasks: sign.yml
+  tags: [sign]
+
+- name: TC-DST — distribution
+  ansible.builtin.include_tasks: distribute.yml
+  tags: [distribute]
+
+- name: TC-REN — renewal
+  ansible.builtin.include_tasks: renew.yml
+  tags: [renew]
+
+- name: TC-PRF — IPA profile
+  ansible.builtin.include_tasks: profile.yml
+  tags: [profile]
