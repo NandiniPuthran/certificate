@@ -1,4 +1,53 @@
 ---
+- name: Ensure every outlet entry defines id, name, and delay
+  ansible.builtin.assert:
+    that:
+      - "'id' in item"
+      - item.id is defined
+      - item.id | string | length > 0
+      - "'name' in item"
+      - item.name is defined
+      - item.name | string | length > 0
+      - "'delay' in item"
+      - item.delay is defined
+      - item.delay | string | length > 0
+    fail_msg: >-
+      Outlet entry {{ item }} in {{ inventory_hostname }}'s outlet list is
+      missing (or has empty) id, name, or delay. All three are mandatory —
+      add the missing field(s) in host_vars.
+    success_msg: "Outlet {{ item.id | default('unknown') }} has all mandatory fields"
+  loop: "{{ outlet | default([]) }}"
+  loop_control:
+    label: "outlet {{ item.id | default('unknown') }}"
+- name: Ensure every configured outlet explicitly defines a delay
+  ansible.builtin.assert:
+    that:
+      - "'delay' in item.1"
+      - item.1.delay is defined
+      - item.1.delay | string | length > 0
+    fail_msg: >-
+      Outlet id {{ item.0 }} ({{ item.1.name | default('unnamed') }}) in
+      {{ inventory_hostname }}'s outlet list is missing a delay value.
+      Add 'delay:' explicitly — this role does not allow relying on the
+      active-outlet default for this PDU.
+  loop: "{{ pdu_outlet_by_id | dict2items(key_name='0', value_name='1') }}"
+  loop_control:
+    label: "outlet {{ item.0 }}"
+- name: Ensure all default fallback vars are defined and non-empty
+  ansible.builtin.assert:
+    that:
+      - pdu_active_default_delay is defined
+      - pdu_active_default_delay | string | length > 0
+      - pdu_unused_delay is defined
+      - pdu_unused_delay | string | length > 0
+      - pdu_active_startup_state is defined
+      - pdu_active_startup_state | string | length > 0
+      - pdu_unused_startup_state is defined
+      - pdu_unused_startup_state | string | length > 0
+    fail_msg: >-
+      One or more fallback default vars (pdu_active_default_delay,
+      pdu_unused_delay, pdu_active_startup_state, pdu_unused_startup_state)
+      is undefined or empty. Fix this in group_vars before continuing.
 # Runs against the "pdus" inventory group. Each PDU's host_vars define:
 #   pdu_outlet_count: 42
 #   outlet: [{id, name, delay}, ...]   <- your existing var, unchanged
