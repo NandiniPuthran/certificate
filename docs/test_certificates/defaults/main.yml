@@ -1,33 +1,47 @@
 ---
-# ── ITserver ─────────────────────────────────────────────────────────────────
+# ── Topology ─────────────────────────────────────────────────────────────────
+# The IT server is the IPA client that signs CSRs. The Ansible controller is
+# the deployer where keys and CSRs are generated.
 tc_ipa_host: "{{ groups['itserver'] | default([]) | first | default('') }}"
 tc_ipa_realm: EXAMPLE.COM
 tc_ipa_ca_cn: Certificate Authority
 
-# ── Certificates under test — set per group in group_vars ────────────────────
-#   - name: apache
-#     cert_path: /etc/ssl/certs/station.pem
-#     key_path:  /etc/ssl/private/station.key
-#     owner: root
-#     group: www-data
-#     cert_mode: '0644'
-#     key_mode:  '0640'
-#     expected_cn: "{{ ansible_facts['fqdn'] }}"
-#     expected_san: ["DNS:{{ ansible_facts['fqdn'] }}"]
-#     service: apache2
-#     tls_port: 443          # optional; enables TC-DST-009
-tc_certs: []
+# ── Layout — identical on the controller and the IT server ───────────────────
+#   /data/certificate/
+#   ├── authenticity.{key,csr,crt}     <- global, at the root
+#   ├── keycloak.{key,csr,crt}         <- global, at the root
+#   └── <short-hostname>/
+#       ├── server.{key,csr,crt}
+#       ├── client.{key,csr,crt}
+#       └── mok.{key,csr,crt}          (mok group only)
+tc_cert_root: /data/certificate
+tc_host_dir: "{{ tc_cert_root }}/{{ inventory_hostname_short }}"
 
-# ── Trust anchor ─────────────────────────────────────────────────────────────
-tc_ca_cert: /usr/local/share/ca-certificates/ipa-ca.crt
+# ── Which certificates exist ─────────────────────────────────────────────────
+# Per-host. `eku` is asserted only when set.
+tc_host_units:
+  - name: server
+    eku: serverAuth
+  - name: client
+    eku: clientAuth
 
-# TC-SGN-004. Strongest test in the suite; needs one value:
-#   openssl x509 -in /etc/ipa/ca.crt -noout -fingerprint -sha256
-# Leave empty and TC-SGN-004 skips with a visible note.
-tc_ca_sha256_pin: ""
+# Added for hosts in tc_mok_group.
+tc_mok_group: mok
+tc_mok_units:
+  - name: mok
 
-# ── Thresholds ───────────────────────────────────────────────────────────────
-tc_renewal_threshold_days: 30
+# Global, generated once, CN and SAN carry the IT server FQDN.
+tc_global_units:
+  - name: authenticity
+  - name: keycloak
+    eku: serverAuth
+
+# ── Expected identity ────────────────────────────────────────────────────────
+tc_expected_cn: "{{ ansible_facts['fqdn'] }}"
+tc_expected_san:
+  - "DNS:{{ ansible_facts['fqdn'] }}"
+
+# ── Policy ───────────────────────────────────────────────────────────────────
 tc_min_key_bits: 2048
 tc_max_clock_skew_seconds: 300
 tc_allowed_sig_algs:
@@ -37,27 +51,19 @@ tc_allowed_sig_algs:
   - ecdsa-with-SHA256
   - ecdsa-with-SHA384
 
-# TC-GEN-013. Expected validity in days, +/- tolerance. 0 disables the test.
+# Expected issued validity in days; 0 disables that test.
 tc_expected_validity_days: 0
 tc_validity_tolerance_days: 2
 
-# ── ipaclient (TC-IPA) ───────────────────────────────────────────────────────
-tc_ipaclient_packages: [freeipa-client, ipa-client]
-tc_krb5_keytab: /etc/krb5.keytab
-# TC-IPA-010/011. Empty disables those two.
-tc_automation_keytab: ""
+# Private keys must not be readable by other users, on either machine.
+tc_key_max_mode: '0600'
+tc_dir_max_mode: '0700'
 
-# ── IPA profile (TC-PRF) ─────────────────────────────────────────────────────
-tc_profile_id: caIPAserviceCert
-
-# ── Queries delegated to ITserver ────────────────────────────────────────────
-# Fleet hosts are not enrolled, so anything authoritative is asked from ITserver
-# on their behalf. false = offline run, those tests skip.
+# ── Delegated IPA queries ────────────────────────────────────────────────────
 tc_query_ipa: true
+tc_krb5_keytab: /etc/krb5.keytab
 tc_krb5_ccache: /run/test_certificates.ccache
-
-# ── Leftover scan (TC-GEN-021) ───────────────────────────────────────────────
-tc_scratch_dirs: [/tmp, /var/tmp]
+tc_ipa_throttle: 8
 
 # ASN.1 timestamp format from community.crypto. Override if yours differs.
 tc_time_format: '%Y%m%d%H%M%SZ'
