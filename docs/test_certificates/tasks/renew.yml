@@ -1,23 +1,258 @@
 ---
-# Is renewal healthy?
+# Certificate renewal tests.
 #
-# This suite cannot force a renewal — cert_renew lives in another repository. So
-# it tests the two things that tell you renewal is working: the certificate is
-# not drifting toward expiry, and certmonger on ITserver is actually wired up to
-# renew it and push the result out.
+# Depends on facts set by gather.yml: tc_cert_info, tc_cert_stat, tc_key_stat,
+# tc_pairs, tc_wire, tc_cm.
+#
+# Renewal cannot be forced from here — cert_renew lives in another repository.
+# So this proves three things instead: the certificate is not drifting toward
+# expiry, the last renewal that did happen produced a correct certificate, and
+# certmonger on the IT server is wired up to keep doing it.
 
-- name: "TC-REN-101: certificate is outside the renewal window"
+# ─────────────────────────────────────────────────────────────────────────────
+# Gather: deployer copies and the backup history
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Checksum the deployer copy of each certificate
+  ansible.builtin.stat:
+    path: "{{ tc_deployer_cert_dir }}/{{ item.src_path }}"
+    get_checksum: true
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  loop: "{{ tc_certs | selectattr('src_path', 'defined') | list }}"
+  loop_control: {label: "{{ item.name }}"}
+  register: tc_src_stat
+
+- name: Checksum the target copy of each certificate
+  ansible.builtin.stat:
+    path: "{{ item.cert_path }}"
+    follow: true
+    get_checksum: true
+    checksum_algorithm: sha256
+  become: true
+  loop: "{{ tc_certs | selectattr('src_path', 'defined') | list }}"
+  loop_control: {label: "{{ item.name }}"}
+  register: tc_tgt_stat
+
+- name: Read the backup certificate bundle from the deployer
+  ansible.builtin.slurp:
+    src: "{{ tc_backup_file }}"
+  delegate_to: localhost
+  become: false
+  register: tc_backup_raw
+  failed_when: false
+  when: tc_backup_file | length > 0
+
+- name: Split the backup bundle into individual certificates
+  ansible.builtin.set_fact:
+    tc_backup_pems: >-
+      {{ (tc_backup_raw.content | default('') | b64decode)
+         | regex_findall('(?s)-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----') }}
+
+- name: Read each certificate in the backup bundle
+  community.crypto.x509_certificate_info:
+    content: "{{ item }}"
+  delegate_to: localhost
+  become: false
+  loop: "{{ tc_backup_pems }}"
+  loop_control:
+    index_var: tc_bidx
+    label: "backup entry {{ tc_bidx + 1 }}"
+  register: tc_backup_info
+  failed_when: false
+
+# Sorting on not_before works lexicographically because the ASN.1 format is
+# YYYYMMDDHHMMSSZ — string order and chronological order are the same.
+- name: Match each certificate to its most recent predecessor in the backup
+  ansible.builtin.set_fact:
+    tc_prev: >-
+      {{ tc_prev | default({}) | combine({
+        item.item.name: (
+          tc_backup_info.results
+          | selectattr('serial_number', 'defined')
+          | selectattr('subject.commonName', 'equalto', item.subject.commonName)
+          | rejectattr('serial_number', 'equalto', item.serial_number)
+          | sort(attribute='not_before')
+          | list | last | default({})
+        )
+      }) }}
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: current state
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Certificate is outside the renewal threshold window
   ansible.builtin.assert:
     that: item.valid_at.horizon
     fail_msg: >-
       {{ item.item.name }} expires on {{ item.not_after }}, within
-      {{ tc_renewal_threshold_days }} days. Renewal should already have run — it
-      has either not fired or is failing.
+      {{ tc_renewal_threshold_days }} days. Renewal should already have run —
+      it has either not fired or is failing.
     quiet: true
   loop: "{{ tc_cert_info.results }}"
   loop_control: {label: "{{ item.item.name }}"}
 
-- name: "TC-REN-102: a certmonger request covers this host"
+- name: Backup file exists and holds at least one previous certificate
+  ansible.builtin.assert:
+    that: (tc_backup_pems | length) > 0
+    fail_msg: >-
+      {{ tc_backup_file }} is missing, empty, or contains no PEM certificates.
+      Nothing can be compared against a previous issuance.
+    quiet: true
+  when: tc_backup_file | length > 0
+
+- name: Renewed certificate and private key are still a matching pair
+  ansible.builtin.assert:
+    that:
+      - not (item.1.failed | default(true))
+      - item.1.public_key_fingerprints.sha256 == item.0.public_key_fingerprints.sha256
+    fail_msg: >-
+      {{ item.0.item.name }}: the key at {{ item.0.item.key_path }} does not
+      match the certificate. A renewal replaced one without the other.
+    quiet: true
+  loop: "{{ tc_pairs }}"
+  loop_control: {label: "{{ item.0.item.name }}"}
+
+- name: Certificate ownership and permissions survived the renewal
+  ansible.builtin.assert:
+    that:
+      - (item.item.owner is not defined) or (item.stat.pw_name == item.item.owner)
+      - (item.item.group is not defined) or (item.stat.gr_name == item.item.group)
+      - (item.item.cert_mode is not defined) or (item.stat.mode == item.item.cert_mode)
+    fail_msg: >-
+      {{ item.item.cert_path }} is {{ item.stat.mode }}
+      {{ item.stat.pw_name }}:{{ item.stat.gr_name }}, expected
+      {{ item.item.cert_mode | default('?') }}
+      {{ item.item.owner | default('?') }}:{{ item.item.group | default('?') }}.
+      A renewal rewrote the file without restoring its attributes.
+    quiet: true
+  loop: "{{ tc_cert_stat.results | selectattr('stat.exists') | list }}"
+  loop_control: {label: "{{ item.item.name }}"}
+
+- name: Private key permissions survived the renewal
+  ansible.builtin.assert:
+    that:
+      - (item.item.key_mode is not defined) or (item.stat.mode == item.item.key_mode)
+      - (item.stat.mode | int(base=8)) % 8 == 0
+    fail_msg: >-
+      {{ item.item.key_path }} is mode {{ item.stat.mode }}, expected
+      {{ item.item.key_mode | default('not world-readable') }}.
+    quiet: true
+  loop: "{{ tc_key_stat.results | selectattr('stat.exists') | list }}"
+  loop_control: {label: "{{ item.item.name }}"}
+
+- name: Target certificate matches the deployer copy
+  ansible.builtin.assert:
+    that: item.0.stat.checksum == item.1.stat.checksum
+    fail_msg: >-
+      {{ item.0.item.name }} on this host does not match
+      {{ tc_deployer_cert_dir }}/{{ item.0.item.src_path }} on the deployer.
+      Either a renewal has not been distributed yet, or the transfer was
+      incomplete.
+    quiet: true
+  loop: "{{ tc_tgt_stat.results | zip(tc_src_stat.results) | list }}"
+  loop_control: {label: "{{ item.0.item.name }}"}
+  when:
+    - item.0.stat.exists
+    - item.1.stat.exists
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: the last renewal that happened was correct
+# Each runs only where a predecessor was found in the backup bundle.
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Renewal produced a new serial number
+  ansible.builtin.assert:
+    that: (item.serial_number | int) != (tc_prev[item.item.name].serial_number | int)
+    fail_msg: >-
+      {{ item.item.name }} carries serial {{ item.serial_number }}, the same as
+      the most recent entry in the backup. Renewal did not issue a new
+      certificate.
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: (tc_prev[item.item.name] | default({})) | length > 0
+
+- name: Renewed certificate starts later than the one it replaced
+  ansible.builtin.assert:
+    that: item.not_before > tc_prev[item.item.name].not_before
+    fail_msg: >-
+      {{ item.item.name }} has notBefore {{ item.not_before }}, not later than
+      the previous certificate's {{ tc_prev[item.item.name].not_before }}. The
+      deployed certificate is older than the one it replaced.
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: (tc_prev[item.item.name] | default({})) | length > 0
+
+- name: Renewed certificate expires later than the one it replaced
+  ansible.builtin.assert:
+    that: item.not_after > tc_prev[item.item.name].not_after
+    fail_msg: >-
+      {{ item.item.name }} has notAfter {{ item.not_after }}, not later than the
+      previous certificate's {{ tc_prev[item.item.name].not_after }}. Renewal
+      gained no additional validity.
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: (tc_prev[item.item.name] | default({})) | length > 0
+
+- name: Subject CN is unchanged across renewal
+  ansible.builtin.assert:
+    that: item.subject.commonName == tc_prev[item.item.name].subject.commonName
+    fail_msg: >-
+      {{ item.item.name }} subject CN changed from
+      '{{ tc_prev[item.item.name].subject.commonName }}' to
+      '{{ item.subject.commonName }}' across renewal.
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: (tc_prev[item.item.name] | default({})) | length > 0
+
+- name: SANs are unchanged across renewal
+  ansible.builtin.assert:
+    that:
+      - (item.subject_alt_name | default([]) | sort)
+        == (tc_prev[item.item.name].subject_alt_name | default([]) | sort)
+    fail_msg: >-
+      {{ item.item.name }} SANs changed across renewal. Was
+      [{{ (tc_prev[item.item.name].subject_alt_name | default([])) | join(', ') }}],
+      now [{{ (item.subject_alt_name | default([])) | join(', ') }}].
+    quiet: true
+  loop: "{{ tc_cert_info.results }}"
+  loop_control: {label: "{{ item.item.name }}"}
+  when: (tc_prev[item.item.name] | default({})) | length > 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: is the service actually using the renewed certificate
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Service is serving the renewed serial, not the old one
+  ansible.builtin.assert:
+    that:
+      - ((item.stdout | trim | regex_replace('^serial=', '') | lower)
+         | regex_replace('^0+', ''))
+        == (('%X' | format(item.item.serial_number)) | lower | regex_replace('^0+', ''))
+    fail_msg: >-
+      {{ item.item.item.service | default('The service') }} is serving serial
+      {{ item.stdout | trim | regex_replace('^serial=', '') | lower }} but the
+      disk holds {{ ('%X' | format(item.item.serial_number)) | lower }}. The
+      certificate was renewed and the service was never reloaded.
+    quiet: true
+  loop: "{{ tc_wire.results | default([]) }}"
+  loop_control: {label: "{{ item.item.item.name | default('skipped') }}"}
+  when:
+    - item.item is defined
+    - item.rc == 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: certmonger tracking on the IT server
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: A certmonger tracking request covers this host
   ansible.builtin.assert:
     that: (tc_cm | length) > 0
     fail_msg: >-
@@ -27,11 +262,11 @@
     quiet: true
   when: tc_query_ipa | bool
 
-- name: "TC-REN-103: the tracking request is MONITORING"
+- name: Tracking request status is MONITORING
   ansible.builtin.assert:
     that:
-      - (((tc_cm | regex_findall('(?im)^[ \t]*status[ \t]*:[ \t]*(\S+)')) + ['']) | first | upper)
-        == 'MONITORING'
+      - (((tc_cm | regex_findall('(?im)^[ \t]*status[ \t]*:[ \t]*(\S+)')) + [''])
+         | first | upper) == 'MONITORING'
     fail_msg: >-
       certmonger status is
       '{{ ((tc_cm | regex_findall('(?im)^[ \t]*status[ \t]*:[ \t]*(\S+)')) + ['none']) | first }}',
@@ -41,11 +276,11 @@
     - tc_query_ipa | bool
     - (tc_cm | length) > 0
 
-- name: "TC-REN-104: the tracking request is not stuck"
+- name: Tracking request is not stuck
   ansible.builtin.assert:
     that:
-      - (((tc_cm | regex_findall('(?im)^[ \t]*stuck[ \t]*:[ \t]*(\S+)')) + ['yes']) | first | lower)
-        == 'no'
+      - (((tc_cm | regex_findall('(?im)^[ \t]*stuck[ \t]*:[ \t]*(\S+)')) + ['yes'])
+         | first | lower) == 'no'
     fail_msg: >-
       The certmonger request is stuck. Renewal will not complete without someone
       intervening on {{ tc_ipa_host }}.
@@ -54,9 +289,9 @@
     - tc_query_ipa | bool
     - (tc_cm | length) > 0
 
-# The silent killer: certmonger renews on ITserver and never pushes the result
-# to the fleet host. Nothing errors. The host expires 30 days later.
-- name: "TC-REN-105: the tracking request has a post-save command"
+# The silent killer: certmonger renews on the IT server and never pushes the
+# result out. Nothing errors. The host expires 30 days later.
+- name: Tracking request has a post-save command configured
   ansible.builtin.assert:
     that:
       - (((tc_cm | regex_findall('(?im)^[ \t]*post-save command[ \t]*:[ \t]*(.+?)[ \t]*$')) + [''])
