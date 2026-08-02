@@ -1,45 +1,84 @@
 ---
-# ── Topology ─────────────────────────────────────────────────────────────────
-# The IT server is the IPA client that signs CSRs. The Ansible controller is
-# the deployer where keys and CSRs are generated.
+
 tc_ipa_host: "{{ groups['itserver'] | default([]) | first | default('') }}"
-tc_ipa_realm: EXAMPLE.COM
 tc_ipa_ca_cn: Certificate Authority
 
-# ── Layout — identical on the controller and the IT server ───────────────────
-#   /data/certificate/
-#   ├── authenticity.{key,csr,crt}     <- global, at the root
-#   ├── keycloak.{key,csr,crt}         <- global, at the root
-#   └── <short-hostname>/
-#       ├── server.{key,csr,crt}
-#       ├── client.{key,csr,crt}
-#       └── mok.{key,csr,crt}          (mok group only)
-tc_cert_root: /data/certificate
-tc_host_dir: "{{ tc_cert_root }}/{{ inventory_hostname_short }}"
 
-# ── Which certificates exist ─────────────────────────────────────────────────
-# Per-host. `eku` is asserted only when set.
+tc_cert_root: /data/certificate
+
+tc_dir_name_var: hostname
+tc_dir_name: >-
+  {{ hostvars[inventory_hostname][tc_dir_name_var]
+     | default(inventory_hostname | upper) }}
+tc_host_dir: "{{ tc_cert_root }}/{{ tc_dir_name }}"
+
+tc_ignore_dirs:
+  - EXTERNAL
+  - SCRIPTS
+
+# ── Certificate units ────────────────────────────────────────────────────────
 tc_host_units:
   - name: server
-    eku: serverAuth
   - name: client
-    eku: clientAuth
 
-# Added for hosts in tc_mok_group.
 tc_mok_group: mok
 tc_mok_units:
   - name: mok
 
-# Global, generated once, CN and SAN carry the IT server FQDN.
 tc_global_units:
   - name: authenticity
   - name: keycloak
-    eku: serverAuth
 
-# ── Expected identity ────────────────────────────────────────────────────────
-tc_expected_cn: "{{ ansible_facts['fqdn'] }}"
-tc_expected_san:
-  - "DNS:{{ ansible_facts['fqdn'] }}"
+tc_shared_dir: DSM
+tc_shared_cn: dsm.01.example.com
+tc_shared_units:
+  - name: server
+  - name: client
+
+tc_is_itserver: "{{ inventory_hostname == tc_ipa_host }}"
+
+tc_units: >-
+  {{ tc_host_units
+     + (tc_mok_units if (tc_mok_group in group_names) else [])
+     + ((tc_global_units | map('combine', {'global': true}) | list)
+        if (inventory_hostname == tc_ipa_host) else [])
+     + ((tc_shared_units | map('combine', {
+          'shared_dir': tc_shared_dir, 'shared_cn': tc_shared_cn}) | list)
+        if ((inventory_hostname == tc_ipa_host) and (tc_shared_dir | length > 0)) else []) }}
+
+
+tc_backup_glob: ".crt_*"
+
+tc_serial_suffix: ".serial"
+
+tc_default_vlan_domain: 01.example.com
+
+_tc_main_vlan: >-
+  {{ '10' if ((net_interface | default({}, true))['10'] is defined) else '01' }}
+
+tc_expected_cn: >-
+  {{ (hostname ~ '.' ~ ((vlan | default({}, true)).get(_tc_main_vlan | string, {})
+                        .get('domain', tc_default_vlan_domain))) | lower }}
+
+# community.crypto reports SANs as 'DNS:name'; ssl_san_dns holds bare names.
+tc_expected_san: >-
+  {{ ssl_san_dns | default([]) | map('lower') | map('regex_replace', '^', 'DNS:') | list }}
+
+# The IT server's own identity, for the global certificates. hostvars is
+# required — without it this would resolve against the current host.
+_tc_ipa_main_vlan: >-
+  {{ '10' if ((hostvars[tc_ipa_host].net_interface | default({}, true))['10'] is defined)
+     else '01' }}
+
+tc_ipa_fqdn: >-
+  {{ (hostvars[tc_ipa_host].hostname ~ '.'
+      ~ ((hostvars[tc_ipa_host].vlan | default({}, true))
+         .get(_tc_ipa_main_vlan | string, {})
+         .get('domain', tc_default_vlan_domain))) | lower }}
+
+tc_ipa_san: >-
+  {{ hostvars[tc_ipa_host].ssl_san_dns | default([])
+     | map('lower') | map('regex_replace', '^', 'DNS:') | list }}
 
 # ── Policy ───────────────────────────────────────────────────────────────────
 tc_min_key_bits: 2048
@@ -51,15 +90,20 @@ tc_allowed_sig_algs:
   - ecdsa-with-SHA256
   - ecdsa-with-SHA384
 
-# Expected issued validity in days; 0 disables that test.
+# The IPA profile issues both usages on every certificate, so this is a drift
+# check on the profile rather than a server-versus-client distinction — these
+# certificates cannot make that distinction.
+tc_required_eku:
+  - TLS Web Server Authentication
+  - TLS Web Client Authentication
+tc_check_eku: true
+
+# Expected issued validity in days; 0 disables that check.
 tc_expected_validity_days: 0
 tc_validity_tolerance_days: 2
 
-# Private keys must not be readable by other users, on either machine.
-tc_key_max_mode: '0600'
-tc_dir_max_mode: '0700'
-
 # ── Delegated IPA queries ────────────────────────────────────────────────────
+# Set false to skip everything that needs a Kerberos credential.
 tc_query_ipa: true
 tc_krb5_keytab: /etc/krb5.keytab
 tc_krb5_ccache: /run/test_certificates.ccache

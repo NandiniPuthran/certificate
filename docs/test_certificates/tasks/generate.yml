@@ -1,181 +1,108 @@
 ---
-# Certificate generation tests.
+# Asserts that the current certificate set is correct.
 #
-# Self-contained — it does its own collection, so it runs before gather.yml
-# exists. Run with:  ansible-playbook -i <inv> test_certificates.yml --tags generate
+# Every check here is about state as it stands now — which is what generation
+# produced, and equally what the last renewal produced. Nothing here needs a
+# previous certificate or the renewal machinery; that is renew.yml's job, and
+# no assertion appears in both files.
 #
-# Generation is a three-link chain:
+# The chain under test:   key  ->  CSR  ->  certificate
 #
-#   controller: key -> CSR        Stage 1
-#   copy to IT server             Stage 2
-#   IT server: CSR -> certificate Stage 3
-#
-# The chain is what gets tested. "A certificate exists and looks valid" is true
-# even when a stale CSR got signed, or another host's did.
+# Each link is checked, because "a certificate exists and looks valid" stays
+# true even when a stale CSR was signed, or another host's was.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Which certificates this host should have
+# Inventory consistency
+#
+# Runs first: CN and SAN come from different inventory variables and nothing
+# keeps them in step. If they have drifted, every identity failure below is a
+# symptom of this one cause.
 # ─────────────────────────────────────────────────────────────────────────────
 
-- name: Work out which certificates belong to this host
-  ansible.builtin.set_fact:
-    tc_units: >-
-      {{ tc_host_units
-         + (tc_mok_units if (tc_mok_group in group_names) else []) }}
-    tc_is_itserver: "{{ inventory_hostname == tc_ipa_host }}"
-
-# Globals live at the root of the certificate directory, carry the IT server's
-# identity, and go through the same three stages — so they are tested as extra
-# units when the play reaches the IT server, not as a separate pipeline.
-- name: Add the global certificates when this host is the IT server
-  ansible.builtin.set_fact:
-    tc_units: >-
-      {{ tc_units + (tc_global_units
-         | map('combine', {'global': true}) | list) }}
-  when: tc_is_itserver | bool
-
-- name: Build the file paths for each unit
-  ansible.builtin.set_fact:
-    tc_files: >-
-      {{ tc_files | default([]) + [{
-           'name': item.name,
-           'eku': item.eku | default(''),
-           'global': item.global | default(false),
-           'dir': (tc_cert_root if (item.global | default(false)) else tc_host_dir),
-           'key': (tc_cert_root if (item.global | default(false)) else tc_host_dir) ~ '/' ~ item.name ~ '.key',
-           'csr': (tc_cert_root if (item.global | default(false)) else tc_host_dir) ~ '/' ~ item.name ~ '.csr',
-           'crt': (tc_cert_root if (item.global | default(false)) else tc_host_dir) ~ '/' ~ item.name ~ '.crt',
-           'cn':  (hostvars[tc_ipa_host].ansible_facts.fqdn | default(tc_ipa_host))
-                  if (item.global | default(false)) else tc_expected_cn,
-           'san': ['DNS:' ~ (hostvars[tc_ipa_host].ansible_facts.fqdn | default(tc_ipa_host))]
-                  if (item.global | default(false)) else tc_expected_san
-         }] }}
-  loop: "{{ tc_units }}"
-  loop_control: {label: "{{ item.name }}"}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STAGE 1 — Ansible controller
-# ─────────────────────────────────────────────────────────────────────────────
-
-- name: Stat the certificate directory on the controller
-  ansible.builtin.stat:
-    path: "{{ (tc_files | first).dir if (tc_files | length > 0) else tc_host_dir }}"
-  delegate_to: localhost
-  become: false
-  register: tc_c_dir
-
-- name: Per-host directory exists on the controller
+- name: Expected CN appears in the expected SAN list
   ansible.builtin.assert:
-    that: tc_c_dir.stat.exists and tc_c_dir.stat.isdir
+    that: ('DNS:' ~ tc_expected_cn) in tc_expected_san
     fail_msg: >-
-      {{ tc_host_dir }} does not exist on the controller. Nothing was generated
-      for {{ inventory_hostname }}.
+      CN {{ tc_expected_cn }} is not in ssl_san_dns
+      [{{ tc_expected_san | join(', ') }}]. These come from different inventory
+      variables and have drifted. Modern TLS clients match on SAN and ignore CN,
+      so a certificate built this way would be rejected.
     quiet: true
 
-- name: Certificate directory on the controller is not world-traversable
+# ─────────────────────────────────────────────────────────────────────────────
+# The certificate directory
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Certificate directory exists
   ansible.builtin.assert:
-    that: (tc_c_dir.stat.mode | int(base=8)) % 8 == 0
+    that: tc_dir.stat.exists and tc_dir.stat.isdir
     fail_msg: >-
-      {{ tc_c_dir.stat.path }} is mode {{ tc_c_dir.stat.mode }} on the
-      controller. This tree holds the private key for every host in the fleet —
-      it must not be traversable by other users.
+      {{ tc_host_dir }} does not exist on {{ tc_ipa_host }}. Nothing was
+      generated or copied for {{ inventory_hostname }}.
     quiet: true
-  when: tc_c_dir.stat.exists
 
-- name: Stat private keys on the controller
-  ansible.builtin.stat:
-    path: "{{ item.key }}"
-    get_checksum: true
-    checksum_algorithm: sha256
-  delegate_to: localhost
-  become: false
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_c_key_stat
+- name: Certificate directory is not world-traversable
+  ansible.builtin.assert:
+    that: (tc_dir.stat.mode | int(base=8)) % 8 == 0
+    fail_msg: >-
+      {{ tc_host_dir }} is mode {{ tc_dir.stat.mode }}. This tree holds private
+      keys and must not be traversable by other users.
+    quiet: true
+  when: tc_dir.stat.exists
 
-- name: Stat CSRs on the controller
-  ansible.builtin.stat:
-    path: "{{ item.csr }}"
-    get_checksum: true
-    checksum_algorithm: sha256
-  delegate_to: localhost
-  become: false
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_c_csr_stat
+# ─────────────────────────────────────────────────────────────────────────────
+# Private keys
+# ─────────────────────────────────────────────────────────────────────────────
 
-- name: Private key exists on the controller
+- name: Private key exists
   ansible.builtin.assert:
     that: item.stat.exists
-    fail_msg: "{{ item.item.key }} is missing on the controller."
+    fail_msg: "{{ item.item.key }} is missing."
     quiet: true
-  loop: "{{ tc_c_key_stat.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_key_stat.results }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
-- name: CSR exists on the controller
-  ansible.builtin.assert:
-    that: item.stat.exists
-    fail_msg: "{{ item.item.csr }} is missing on the controller."
-    quiet: true
-  loop: "{{ tc_c_csr_stat.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
-
-- name: Private key on the controller is not readable by other users
+- name: Private key is not readable by other users
   ansible.builtin.assert:
     that: (item.stat.mode | int(base=8)) % 64 == 0
     fail_msg: >-
-      {{ item.item.key }} is mode {{ item.stat.mode }} on the controller —
-      readable beyond its owner.
+      {{ item.item.key }} is mode {{ item.stat.mode }} — readable beyond its
+      owner.
     quiet: true
-  loop: "{{ tc_c_key_stat.results | selectattr('stat.exists') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_key_stat.results | selectattr('stat.exists') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
-- name: Read private keys on the controller
-  community.crypto.openssl_privatekey_info:
-    path: "{{ item.key }}"
-  delegate_to: localhost
-  become: false
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_c_key
-  failed_when: false
-
-- name: Read CSRs on the controller
-  community.crypto.openssl_csr_info:
-    path: "{{ item.csr }}"
-  delegate_to: localhost
-  become: false
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_c_csr
-  failed_when: false
-
-- name: Private key parses on the controller
+- name: Private key parses
   ansible.builtin.assert:
-    that: not (item.failed | default(true))
+    that: not (item.failed | bool)
     fail_msg: "{{ item.item.key }} does not parse as a private key."
     quiet: true
-  loop: "{{ tc_c_key.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
-
-- name: CSR parses on the controller
-  ansible.builtin.assert:
-    that: not (item.failed | default(true))
-    fail_msg: "{{ item.item.csr }} does not parse as a CSR."
-    quiet: true
-  loop: "{{ tc_c_csr.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_key.results }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: Private key type and size meet policy
   ansible.builtin.assert:
     that:
-      - (item.type | lower) != 'rsa' or (item.public_data.size | int) >= (tc_min_key_bits | int)
+      - (item.type | lower) != 'rsa'
+        or (item.public_data.size | int) >= (tc_min_key_bits | int)
     fail_msg: >-
       {{ item.item.key }} is a {{ item.public_data.size }}-bit {{ item.type }}
       key; minimum is {{ tc_min_key_bits }}.
     quiet: true
-  loop: "{{ tc_c_key.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_key.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSRs
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: CSR exists and parses
+  ansible.builtin.assert:
+    that: not (item.failed | bool)
+    fail_msg: "{{ item.item.csr }} is missing or does not parse as a CSR."
+    quiet: true
+  loop: "{{ tc_csr.results }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: CSR signature is self-consistent
   ansible.builtin.assert:
@@ -184,203 +111,71 @@
       {{ item.item.csr }} has an invalid self-signature. It was not produced by
       the key that claims to have signed it.
     quiet: true
-  loop: "{{ tc_c_csr.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_csr.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
-# The first link in the chain. A stale CSR left from an earlier run signs the
-# wrong public key, and the host ends up with a certificate it has no key for.
+# First link. A stale CSR beside a newer key means the certificate is issued for
+# a public key the host does not hold the private half of.
 - name: CSR public key matches the private key beside it
   ansible.builtin.assert:
     that: item.0.public_key_fingerprints.sha256 == item.1.public_key_fingerprints.sha256
     fail_msg: >-
-      {{ item.0.item.csr }} was not built from {{ item.0.item.key }} — the public
-      keys differ. One of the two is stale.
+      {{ item.0.item.csr }} was not built from {{ item.0.item.key }} — the
+      public keys differ. One of the two is stale.
     quiet: true
-  loop: "{{ tc_c_csr.results | zip(tc_c_key.results) | list }}"
-  loop_control: {label: "{{ item.0.item.name }}"}
+  loop: "{{ tc_csr.results | zip(tc_key.results) | list }}"
+  loop_control: {label: "{{ item.0.item.name }}" }
   when:
-    - not (item.0.failed | default(true))
-    - not (item.1.failed | default(true))
+    - not (item.0.failed | bool)
+    - not (item.1.failed | bool)
 
 - name: CSR CN matches the expected identity
   ansible.builtin.assert:
-    that: item.subject.commonName == item.item.cn
+    that: (item.subject.commonName | lower) == item.item.cn
     fail_msg: >-
       {{ item.item.csr }} CN is '{{ item.subject.commonName }}', expected
       '{{ item.item.cn }}'.
     quiet: true
-  loop: "{{ tc_c_csr.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_csr.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: CSR SANs include every expected name
   ansible.builtin.assert:
-    that: (item.item.san | difference(item.subject_alt_name | default([]))) | length == 0
+    that:
+      - (item.item.san | difference(item.subject_alt_name | default([]) | map('lower') | list))
+        | length == 0
     fail_msg: >-
       {{ item.item.csr }} is missing SANs
-      {{ item.item.san | difference(item.subject_alt_name | default([])) | join(', ') }}.
+      {{ item.item.san | difference(item.subject_alt_name | default([]) | map('lower') | list)
+         | join(', ') }}.
       Present: {{ (item.subject_alt_name | default([])) | join(', ') }}.
     quiet: true
-  loop: "{{ tc_c_csr.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_csr.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STAGE 2 — after the copy to the IT server
+# Signed certificates
 # ─────────────────────────────────────────────────────────────────────────────
 
-- name: Stat the certificate directory on the IT server
-  ansible.builtin.stat:
-    path: "{{ (tc_files | first).dir if (tc_files | length > 0) else tc_host_dir }}"
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  register: tc_s_dir
-
-- name: Per-host directory exists on the IT server
-  ansible.builtin.assert:
-    that: tc_s_dir.stat.exists and tc_s_dir.stat.isdir
-    fail_msg: >-
-      {{ tc_host_dir }} does not exist on {{ tc_ipa_host }}. The copy step never
-      ran for {{ inventory_hostname }}.
-    quiet: true
-
-- name: Certificate directory on the IT server is not world-traversable
-  ansible.builtin.assert:
-    that: (tc_s_dir.stat.mode | int(base=8)) % 8 == 0
-    fail_msg: >-
-      {{ tc_s_dir.stat.path }} is mode {{ tc_s_dir.stat.mode }} on
-      {{ tc_ipa_host }}. This tree holds private keys.
-    quiet: true
-  when: tc_s_dir.stat.exists
-
-- name: Stat private keys on the IT server
-  ansible.builtin.stat:
-    path: "{{ item.key }}"
-    get_checksum: true
-    checksum_algorithm: sha256
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_s_key_stat
-
-- name: Stat CSRs on the IT server
-  ansible.builtin.stat:
-    path: "{{ item.csr }}"
-    get_checksum: true
-    checksum_algorithm: sha256
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_s_csr_stat
-
-- name: Private key is present on the IT server
-  ansible.builtin.assert:
-    that: item.stat.exists
-    fail_msg: "{{ item.item.key }} is missing on {{ tc_ipa_host }}."
-    quiet: true
-  loop: "{{ tc_s_key_stat.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
-
-- name: CSR is present on the IT server
-  ansible.builtin.assert:
-    that: item.stat.exists
-    fail_msg: "{{ item.item.csr }} is missing on {{ tc_ipa_host }}."
-    quiet: true
-  loop: "{{ tc_s_csr_stat.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
-
-- name: Private key on the IT server is not readable by other users
-  ansible.builtin.assert:
-    that: (item.stat.mode | int(base=8)) % 64 == 0
-    fail_msg: >-
-      {{ item.item.key }} is mode {{ item.stat.mode }} on {{ tc_ipa_host }} —
-      readable beyond its owner.
-    quiet: true
-  loop: "{{ tc_s_key_stat.results | selectattr('stat.exists') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
-
-# The second link. A failed copy leaves an older CSR in place, and the IT server
-# signs that instead — producing a certificate for the wrong public key.
-- name: CSR on the IT server is byte-identical to the controller's copy
-  ansible.builtin.assert:
-    that: item.0.stat.checksum == item.1.stat.checksum
-    fail_msg: >-
-      {{ item.0.item.csr }} differs between the controller and {{ tc_ipa_host }}.
-      The copy step did not complete, so the CSR being signed is not the one
-      that was generated.
-    quiet: true
-  loop: "{{ tc_c_csr_stat.results | zip(tc_s_csr_stat.results) | list }}"
-  loop_control: {label: "{{ item.0.item.name }}"}
-  when:
-    - item.0.stat.exists
-    - item.1.stat.exists
-
-- name: Private key on the IT server is byte-identical to the controller's copy
-  ansible.builtin.assert:
-    that: item.0.stat.checksum == item.1.stat.checksum
-    fail_msg: >-
-      {{ item.0.item.key }} differs between the controller and {{ tc_ipa_host }}.
-    quiet: true
-  loop: "{{ tc_c_key_stat.results | zip(tc_s_key_stat.results) | list }}"
-  loop_control: {label: "{{ item.0.item.name }}"}
-  when:
-    - item.0.stat.exists
-    - item.1.stat.exists
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STAGE 3 — after signing on the IT server
-# ─────────────────────────────────────────────────────────────────────────────
-
-- name: Stat certificates on the IT server
-  ansible.builtin.stat:
-    path: "{{ item.crt }}"
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_s_crt_stat
-
-- name: Certificate exists on the IT server
+- name: Certificate exists
   ansible.builtin.assert:
     that: item.stat.exists
     fail_msg: >-
-      {{ item.item.crt }} is missing on {{ tc_ipa_host }}. The CSR was copied but
-      never signed.
+      {{ item.item.crt }} is missing. The CSR is present but was never signed.
     quiet: true
-  loop: "{{ tc_s_crt_stat.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
-
-- name: Read certificates on the IT server
-  community.crypto.x509_certificate_info:
-    path: "{{ item.crt }}"
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_s_crt
-  failed_when: false
-
-# Read the CSR as it exists on the IT server — that is the one that was signed.
-- name: Read CSRs on the IT server
-  community.crypto.openssl_csr_info:
-    path: "{{ item.csr }}"
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  loop: "{{ tc_files }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_s_csr
-  failed_when: false
+  loop: "{{ tc_crt_stat.results }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: Certificate parses as valid X.509
   ansible.builtin.assert:
-    that: not (item.failed | default(true))
+    that: not (item.failed | bool)
     fail_msg: "{{ item.item.crt }} does not parse as an X.509 certificate."
     quiet: true
-  loop: "{{ tc_s_crt.results }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_crt.results }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
-# The third link, and the end-to-end binding. Proves this certificate was issued
-# from this CSR — not a stale one, and not another host's.
+# Second link, and the end-to-end binding: proves this certificate was issued
+# from this CSR, not a stale one and not another host's.
 - name: Certificate public key matches the CSR it was signed from
   ansible.builtin.assert:
     that: item.0.public_key_fingerprints.sha256 == item.1.public_key_fingerprints.sha256
@@ -388,55 +183,54 @@
       {{ item.0.item.crt }} was not issued from {{ item.0.item.csr }} — the
       public keys differ. A different CSR was signed.
     quiet: true
-  loop: "{{ tc_s_crt.results | zip(tc_s_csr.results) | list }}"
-  loop_control: {label: "{{ item.0.item.name }}"}
+  loop: "{{ tc_crt.results | zip(tc_csr.results) | list }}"
+  loop_control: {label: "{{ item.0.item.name }}" }
   when:
-    - not (item.0.failed | default(true))
-    - not (item.1.failed | default(true))
+    - not (item.0.failed | bool)
+    - not (item.1.failed | bool)
 
 - name: Certificate public key matches the private key
   ansible.builtin.assert:
     that: item.0.public_key_fingerprints.sha256 == item.1.public_key_fingerprints.sha256
     fail_msg: >-
-      {{ item.0.item.crt }} does not match {{ item.0.item.key }}. The host would
-      hold a certificate it has no private key for.
+      {{ item.0.item.crt }} does not match {{ item.0.item.key }}. The host holds
+      a certificate it has no private key for.
     quiet: true
-  loop: "{{ tc_s_crt.results | zip(tc_c_key.results) | list }}"
-  loop_control: {label: "{{ item.0.item.name }}"}
+  loop: "{{ tc_crt.results | zip(tc_key.results) | list }}"
+  loop_control: {label: "{{ item.0.item.name }}" }
   when:
-    - not (item.0.failed | default(true))
-    - not (item.1.failed | default(true))
+    - not (item.0.failed | bool)
+    - not (item.1.failed | bool)
 
-- name: Certificate CN matches the CSR CN
+- name: Certificate CN matches the expected identity
   ansible.builtin.assert:
-    that: item.0.subject.commonName == item.1.subject.commonName
+    that: (item.subject.commonName | lower) == item.item.cn
     fail_msg: >-
-      {{ item.0.item.crt }} CN is '{{ item.0.subject.commonName }}' but the CSR
-      asked for '{{ item.1.subject.commonName }}'.
+      {{ item.item.crt }} CN is '{{ item.subject.commonName }}', expected
+      '{{ item.item.cn }}'.
     quiet: true
-  loop: "{{ tc_s_crt.results | zip(tc_s_csr.results) | list }}"
-  loop_control: {label: "{{ item.0.item.name }}"}
-  when:
-    - not (item.0.failed | default(true))
-    - not (item.1.failed | default(true))
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
-- name: Certificate SANs match the CSR SANs
+- name: Certificate SANs include every expected name
   ansible.builtin.assert:
     that:
-      - ((item.1.subject_alt_name | default([]))
-         | difference(item.0.subject_alt_name | default([]))) | length == 0
+      - (item.item.san | difference(item.subject_alt_name | default([]) | map('lower') | list))
+        | length == 0
     fail_msg: >-
-      {{ item.0.item.crt }} is missing SANs the CSR requested:
-      {{ (item.1.subject_alt_name | default([]))
-         | difference(item.0.subject_alt_name | default([])) | join(', ') }}.
+      {{ item.item.crt }} is missing SANs
+      {{ item.item.san | difference(item.subject_alt_name | default([]) | map('lower') | list)
+         | join(', ') }}.
+      Present: {{ (item.subject_alt_name | default([])) | join(', ') }}.
       The IPA profile may be stripping them.
     quiet: true
-  loop: "{{ tc_s_crt.results | zip(tc_s_csr.results) | list }}"
-  loop_control: {label: "{{ item.0.item.name }}"}
-  when:
-    - not (item.0.failed | default(true))
-    - not (item.1.failed | default(true))
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
+# A name check, not a cryptographic one — any CA can call itself
+# "CN=Certificate Authority". Full chain verification against a pinned anchor is
+# deliberately out of scope here; what does hold this together is that IPA
+# confirms it issued the serial, below.
 - name: Certificate issuer is the IPA CA
   ansible.builtin.assert:
     that: item.issuer.commonName == tc_ipa_ca_cn
@@ -444,8 +238,8 @@
       {{ item.item.crt }} issuer CN is '{{ item.issuer.commonName }}', expected
       '{{ tc_ipa_ca_cn }}'.
     quiet: true
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: Certificate is inside its validity window
   ansible.builtin.assert:
@@ -454,8 +248,8 @@
       {{ item.item.crt }} is outside its validity window (notBefore
       {{ item.not_before }}, notAfter {{ item.not_after }}).
     quiet: true
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: Certificate notBefore is not in the future beyond allowed skew
   ansible.builtin.assert:
@@ -466,8 +260,8 @@
       {{ item.item.crt }} notBefore is {{ item.not_before }}, in the future
       beyond the allowed skew. Check NTP on {{ tc_ipa_host }}.
     quiet: true
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: Certificate signature algorithm is approved
   ansible.builtin.assert:
@@ -476,8 +270,8 @@
       {{ item.item.crt }} is signed with '{{ item.signature_algorithm }}', which
       is not on the approved list. Check the IPA certificate profile.
     quiet: true
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
 - name: Certificate key size meets policy
   ansible.builtin.assert:
@@ -488,27 +282,22 @@
       {{ item.item.crt }} carries a {{ item.public_key_data.size }}-bit key;
       minimum is {{ tc_min_key_bits }}.
     quiet: true
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
 
-- name: Certificate carries the expected extended key usage
+- name: Certificate carries the expected extended key usages
   ansible.builtin.assert:
     that:
-      - (item.item.eku == 'serverAuth' and
-         (('TLS Web Server Authentication' in (item.extended_key_usage | default([])))
-          or ('serverAuth' in (item.extended_key_usage | default([])))))
-        or
-        (item.item.eku == 'clientAuth' and
-         (('TLS Web Client Authentication' in (item.extended_key_usage | default([])))
-          or ('clientAuth' in (item.extended_key_usage | default([])))))
+      - (tc_required_eku | difference(item.extended_key_usage | default([]))) | length == 0
     fail_msg: >-
-      {{ item.item.crt }} does not carry {{ item.item.eku }}. Present:
-      {{ (item.extended_key_usage | default([])) | join(', ') or 'none' }}.
-      Check the IPA certificate profile.
+      {{ item.item.crt }} is missing EKUs
+      {{ tc_required_eku | difference(item.extended_key_usage | default([])) | join(', ') }}.
+      Present: {{ (item.extended_key_usage | default([])) | join(', ') or 'none' }}.
+      The IPA certificate profile may have changed.
     quiet: true
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
-  when: item.item.eku | length > 0
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
+  when: tc_check_eku | bool
 
 - name: Certificate validity period matches the IPA profile
   ansible.builtin.assert:
@@ -524,130 +313,57 @@
       expected {{ tc_expected_validity_days }}
       (+/- {{ tc_validity_tolerance_days }}). The profile may have changed.
     quiet: true
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}"}
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
   when: (tc_expected_validity_days | int) > 0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STAGE 3 (continued) — what IPA itself says
+# What IPA says
 # ─────────────────────────────────────────────────────────────────────────────
-
-- name: Authenticate to IPA on the IT server
-  ansible.builtin.command:
-    argv: [kinit, -k, -t, "{{ tc_krb5_keytab }}"]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  changed_when: false
-  failed_when: false
-  register: tc_kinit
-  when: tc_query_ipa | bool
-
-- name: Ask IPA about each issued serial
-  ansible.builtin.command:
-    argv: [ipa, cert-show, "{{ item.serial_number }}"]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  changed_when: false
-  failed_when: false
-  throttle: "{{ tc_ipa_throttle | int }}"
-  loop: "{{ tc_s_crt.results | rejectattr('failed', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }} serial={{ item.serial_number }}"}
-  register: tc_ipa_show
-  when:
-    - tc_query_ipa | bool
-    - (tc_kinit.rc | default(1)) == 0
-
-- name: Ask IPA for the host entry
-  ansible.builtin.command:
-    argv: [ipa, host-show, "{{ ansible_facts['fqdn'] }}"]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  changed_when: false
-  failed_when: false
-  throttle: "{{ tc_ipa_throttle | int }}"
-  register: tc_ipa_host_show
-  when:
-    - tc_query_ipa | bool
-    - (tc_kinit.rc | default(1)) == 0
-    - not (tc_is_itserver | bool)
 
 - name: IPA has a record of the issued serial
   ansible.builtin.assert:
     that: item.rc == 0
     fail_msg: >-
       IPA has no record of serial {{ item.item.serial_number }}
-      ({{ item.item.item.crt }}). The certificate was not issued by this CA, or
-      was issued outside IPA.
+      ({{ item.item.item.crt }}). The certificate was issued outside IPA, or by
+      a different CA.
     quiet: true
   loop: "{{ tc_ipa_show.results | default([]) }}"
-  loop_control: {label: "{{ item.item.item.name | default('skipped') }}"}
+  loop_control: {label: "{{ item.item.item.name | default('skipped') }}" }
   when: item.item is defined
 
 - name: An IPA host entry exists for this host
   ansible.builtin.assert:
     that: tc_ipa_host_show.rc == 0
     fail_msg: >-
-      IPA has no host entry for {{ ansible_facts['fqdn'] }}. Certificates cannot
-      be issued or renewed against a principal that does not exist.
+      IPA has no host entry for {{ tc_expected_cn }}. Certificates cannot be
+      issued or renewed against a principal that does not exist.
     quiet: true
-  when:
-    - tc_query_ipa | bool
-    - not (tc_is_itserver | bool)
-    - tc_ipa_host_show.rc is defined
+  when: tc_ipa_host_show.rc is defined
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fleet-wide consistency — runs once, not per host
+# Fleet-wide consistency — runs once
 # ─────────────────────────────────────────────────────────────────────────────
 
-- name: List per-host directories on the controller
-  ansible.builtin.find:
-    paths: "{{ tc_cert_root }}"
-    file_type: directory
-    recurse: false
-  delegate_to: localhost
-  become: false
-  run_once: true
-  register: tc_all_dirs
-  failed_when: false
-
-- name: No per-host directory exists for a host absent from the inventory
+- name: No unexpected directory exists under the certificate root
   ansible.builtin.assert:
     that: _orphans | length == 0
     fail_msg: >-
-      Directories in {{ tc_cert_root }} with no matching inventory host:
-      {{ _orphans | join(', ') }}. These are decommissioned hosts whose private
-      keys are still on disk.
+      Directories in {{ tc_cert_root }} that match no inventory host, no shared
+      group, and are not in tc_ignore_dirs: {{ _orphans | join(', ') }}.
+      Either a decommissioned host still has private keys on disk, or this is a
+      directory that should be declared or ignored.
     quiet: true
   vars:
+    # Compared against the whole inventory rather than the play, so --limit does
+    # not flag every other host's directory. Both sides uppercased so the
+    # comparison holds whatever case the directories were created with.
     _orphans: >-
-      {{ (tc_all_dirs.files | default([]) | map(attribute='path') | map('basename') | list)
-         | difference(ansible_play_hosts_all
-                      | map('extract', hostvars, 'inventory_hostname_short') | list) }}
+      {{ (tc_all_dirs.files | default([]) | map(attribute='path')
+          | map('basename') | map('upper') | list)
+         | difference(tc_all_dir_names | default([]) | map('upper') | list)
+         | difference(tc_ignore_dirs | map('upper') | list)
+         | difference([tc_shared_dir | upper]) }}
   run_once: true
   when: tc_all_dirs.files is defined
-
-- name: Global certificates are not present in any per-host directory
-  ansible.builtin.find:
-    paths: "{{ tc_host_dir }}"
-    patterns: "{{ tc_global_units | map(attribute='name') | map('regex_replace', '$', '.*') | list }}"
-    file_type: file
-  delegate_to: localhost
-  become: false
-  register: tc_global_leak
-  failed_when: false
-  when: not (tc_is_itserver | bool)
-
-- name: No global certificate has leaked into a per-host directory
-  ansible.builtin.assert:
-    that: (tc_global_leak.files | default([])) | length == 0
-    fail_msg: >-
-      Global certificate files found in {{ tc_host_dir }}:
-      {{ (tc_global_leak.files | default([]) | map(attribute='path') | map('basename') | list) | join(', ') }}.
-      These belong at {{ tc_cert_root }} and are not distributed per host.
-    quiet: true
-  when:
-    - not (tc_is_itserver | bool)
-    - tc_global_leak.files is defined

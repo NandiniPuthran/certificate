@@ -1,157 +1,259 @@
 ---
-# Collects everything the test files need, once. No assertions here except the
-# guard that stops a host with nothing declared from reporting a clean run.
+# Reads every piece of state the assertion files need, once.
+#
+# Runs with tags: always, so without scoping a --tags renew run would still pay
+# for the IPA queries and a --tags generate run would still shell out to
+# certmonger. Each block below is gated to the area that consumes it.
+#
+# No assertions here. Anything that can legitimately be absent is registered
+# with failed_when: false and judged in generate.yml or renew.yml, so a missing
+# file produces a named test failure rather than an unhandled error.
 
-- name: Check a certificate inventory was declared for this host
-  ansible.builtin.assert:
-    that: tc_certs | length > 0
-    fail_msg: >-
-      No tc_certs declared for {{ inventory_hostname }}. A host with nothing to
-      check must not report a clean run — define it in group_vars.
-    quiet: true
+- name: Determine which areas are in scope for this run
+  ansible.builtin.set_fact:
+    tc_want_generate: "{{ ('all' in ansible_run_tags) or ('generate' in ansible_run_tags) }}"
+    tc_want_renew: "{{ ('all' in ansible_run_tags) or ('renew' in ansible_run_tags) }}"
 
-- name: Stat certificates
+# ─────────────────────────────────────────────────────────────────────────────
+# Resolve units into concrete paths
+#
+# Three scopes resolve here:
+#   shared — fixed directory and CN (the group certificates)
+#   global — root directory, IT server identity
+#   host   — the host's own directory and identity
+#
+# `name` is the display label, prefixed for shared units so DSM/server does not
+# read as this host's server. `base` stays the raw unit name, since that is what
+# the files on disk are called.
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Build the file paths and expected identity for each certificate
+  ansible.builtin.set_fact:
+    tc_files: >-
+      {{ tc_files | default([]) + [{
+           'name': (item.shared_dir ~ '/' ~ item.name)
+                   if (item.shared_dir is defined) else item.name,
+           'base': item.name,
+           'dir': _dir,
+           'key': _dir ~ '/' ~ item.name ~ '.key',
+           'csr': _dir ~ '/' ~ item.name ~ '.csr',
+           'crt': _dir ~ '/' ~ item.name ~ '.crt',
+           'serial': _dir ~ '/' ~ item.name ~ tc_serial_suffix,
+           'cn':  item.shared_cn if (item.shared_cn is defined)
+                  else (tc_ipa_fqdn if (item.global | default(false)) else tc_expected_cn),
+           'san': ['DNS:' ~ item.shared_cn] if (item.shared_cn is defined)
+                  else (tc_ipa_san if (item.global | default(false)) else tc_expected_san)
+         }] }}
+  vars:
+    _dir: >-
+      {{ (tc_cert_root ~ '/' ~ item.shared_dir) if (item.shared_dir is defined)
+         else (tc_cert_root if (item.global | default(false)) else tc_host_dir) }}
+  loop: "{{ tc_units }}"
+  loop_control: {label: "{{ item.name }}" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# On-disk state — needed by both areas
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Stat the certificate directory
   ansible.builtin.stat:
-    path: "{{ item.cert_path }}"
-    follow: true
+    path: "{{ tc_host_dir }}"
+  delegate_to: "{{ tc_ipa_host }}"
   become: true
-  loop: "{{ tc_certs }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_cert_stat
+  register: tc_dir
 
 - name: Stat private keys
   ansible.builtin.stat:
-    path: "{{ item.key_path }}"
+    path: "{{ item.key }}"
+  delegate_to: "{{ tc_ipa_host }}"
   become: true
-  loop: "{{ tc_certs }}"
-  loop_control: {label: "{{ item.name }}"}
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
   register: tc_key_stat
 
-- name: Select the certificates that exist
-  ansible.builtin.set_fact:
-    tc_present: "{{ tc_cert_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+- name: Stat certificates
+  ansible.builtin.stat:
+    path: "{{ item.crt }}"
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
+  register: tc_crt_stat
+
+# These three use failed_when: false so a missing or corrupt file is reported as
+# a named test failure rather than aborting the run. NOTE that this sets
+# failed: false on every result, so downstream filtering must be
+# rejectattr('failed') — rejectattr('failed', 'defined') would match every entry
+# and silently skip the whole loop.
+- name: Read private keys
+  community.crypto.openssl_privatekey_info:
+    path: "{{ item.key }}"
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
+  register: tc_key
+  failed_when: false
+
+- name: Read CSRs
+  community.crypto.openssl_csr_info:
+    path: "{{ item.csr }}"
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
+  register: tc_csr
+  failed_when: false
 
 - name: Read certificates
   community.crypto.x509_certificate_info:
-    path: "{{ item.cert_path }}"
-    valid_at:
-      now: "+0s"
-      horizon: "+{{ tc_renewal_threshold_days }}d"
+    path: "{{ item.crt }}"
+  delegate_to: "{{ tc_ipa_host }}"
   become: true
-  loop: "{{ tc_present }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_cert_info
-
-- name: Read private keys
-  community.crypto.openssl_privatekey_info:
-    path: "{{ item.key_path }}"
-  become: true
-  loop: "{{ tc_present }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_key_info
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
+  register: tc_crt
   failed_when: false
 
-- name: Read the IPA CA certificate
-  community.crypto.x509_certificate_info:
-    path: "{{ tc_ca_cert }}"
-  become: true
-  register: tc_ca_info
-  failed_when: false
+# ─────────────────────────────────────────────────────────────────────────────
+# What IPA says — generate only
+# ─────────────────────────────────────────────────────────────────────────────
 
-# item.0 = certificate, item.1 = key — lets the test files check both at once.
-- name: Pair certificates with their keys
-  ansible.builtin.set_fact:
-    tc_pairs: "{{ tc_cert_info.results | zip(tc_key_info.results) | list }}"
-
-- name: Verify each certificate against the CA
-  ansible.builtin.command:
-    argv: [openssl, verify, -CAfile, "{{ tc_ca_cert }}", "{{ item.cert_path }}"]
-  become: true
-  changed_when: false
-  failed_when: false
-  loop: "{{ tc_present }}"
-  loop_control: {label: "{{ item.name }}"}
-  register: tc_openssl_verify
-
-- name: Look for leftover CSR and key material in scratch directories
-  ansible.builtin.find:
-    paths: "{{ tc_scratch_dirs }}"
-    patterns: ['*.csr', '*.key', '*.pem']
-    file_type: file
-  become: true
-  register: tc_leftovers
-
-- name: Read the certificate each TLS listener is serving
-  ansible.builtin.shell:
-    cmd: >-
-      set -o pipefail;
-      openssl s_client -connect 127.0.0.1:{{ item.item.tls_port }}
-      -servername {{ item.item.expected_cn | default(ansible_facts['fqdn']) }}
-      </dev/null 2>/dev/null | openssl x509 -noout -serial
-    executable: /bin/bash
-  become: true
-  changed_when: false
-  failed_when: false
-  loop: "{{ tc_cert_info.results | selectattr('item.tls_port', 'defined') | list }}"
-  loop_control: {label: "{{ item.item.name }}:{{ item.item.tls_port }}"}
-  register: tc_wire
-
-# ── Delegated to ITserver: fleet hosts cannot talk to IPA themselves ─────────
-
-- name: Authenticate to IPA on ITserver
+- name: Authenticate to IPA on the IT server
   ansible.builtin.command:
     argv: [kinit, -k, -t, "{{ tc_krb5_keytab }}"]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}" }
   delegate_to: "{{ tc_ipa_host }}"
   become: true
   changed_when: false
   failed_when: false
   register: tc_kinit
-  when: tc_query_ipa | bool
+  when:
+    - tc_query_ipa | bool
+    - tc_want_generate | bool
 
-- name: Set a flag for whether delegated queries are usable
+- name: Record whether IPA queries are usable
   ansible.builtin.set_fact:
-    tc_online: "{{ (tc_query_ipa | bool) and ((tc_kinit.rc | default(1)) == 0) }}"
+    tc_online: >-
+      {{ (tc_query_ipa | bool) and (tc_want_generate | bool)
+         and ((tc_kinit.rc | default(1)) == 0) }}
 
-- name: Ask IPA about each deployed serial
+- name: Ask IPA about each issued serial
   ansible.builtin.command:
-    argv: [ipa, cert-show, "{{ item.serial_number }}", --all, --raw]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+    argv: [ipa, cert-show, "{{ item.serial_number }}"]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}" }
   delegate_to: "{{ tc_ipa_host }}"
   become: true
   changed_when: false
   failed_when: false
-  throttle: 8
-  loop: "{{ tc_cert_info.results }}"
-  loop_control: {label: "{{ item.item.name }} serial={{ item.serial_number }}"}
+  throttle: "{{ tc_ipa_throttle | int }}"
+  loop: "{{ tc_crt.results | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }} serial={{ item.serial_number }}" }
   register: tc_ipa_show
   when: tc_online | bool
 
 - name: Ask IPA for the host entry
   ansible.builtin.command:
-    argv: [ipa, host-show, "{{ ansible_facts['fqdn'] }}"]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+    argv: [ipa, host-show, "{{ tc_expected_cn }}"]
+  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}" }
   delegate_to: "{{ tc_ipa_host }}"
   become: true
   changed_when: false
   failed_when: false
-  throttle: 8
+  throttle: "{{ tc_ipa_throttle | int }}"
   register: tc_ipa_host_show
   when: tc_online | bool
 
-- name: Ask IPA for every certificate it holds for this subject
-  ansible.builtin.command:
-    argv: [ipa, cert-find, "--subject={{ ansible_facts['fqdn'] }}", --sizelimit=0, --all, --raw]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
+- name: List directories under the certificate root
+  ansible.builtin.find:
+    paths: "{{ tc_cert_root }}"
+    file_type: directory
+    recurse: false
   delegate_to: "{{ tc_ipa_host }}"
   become: true
-  changed_when: false
+  run_once: true
+  register: tc_all_dirs
   failed_when: false
-  throttle: 8
-  register: tc_ipa_find
-  when: tc_online | bool
+  when: tc_want_generate | bool
 
-- name: Read certmonger tracking on ITserver
+# Built in a loop rather than one expression, because each host needs its own
+# `hostname` lookup with a fallback.
+- name: Build the expected directory name for every inventory host
+  ansible.builtin.set_fact:
+    tc_all_dir_names: >-
+      {{ tc_all_dir_names | default([])
+         + [ hostvars[item][tc_dir_name_var] | default(item | upper) ] }}
+  loop: "{{ groups['all'] }}"
+  loop_control: {label: "{{ item }}" }
+  run_once: true
+  when: tc_want_generate | bool
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Renewal evidence — renew only
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Read the serial files
+  ansible.builtin.slurp:
+    src: "{{ item.serial }}"
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
+  register: tc_serial
+  failed_when: false
+  when: tc_want_renew | bool
+
+- name: Find renewal backups
+  ansible.builtin.find:
+    paths: "{{ item.dir }}"
+    patterns: "{{ item.base }}{{ tc_backup_glob }}"
+    file_type: file
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
+  register: tc_backups
+  failed_when: false
+  when: tc_want_renew | bool
+
+# Chosen by mtime rather than by parsing the timestamp out of the filename, so
+# the naming format can change without breaking these tests.
+- name: Select the most recent backup for each certificate
+  ansible.builtin.set_fact:
+    tc_prev_paths: >-
+      {{ tc_prev_paths | default([]) + [{
+           'name': item.item.name,
+           'path': ((item.files | sort(attribute='mtime') | last).path
+                    if ((item.files | default([]) | length) > 0) else '')
+         }] }}
+  loop: "{{ tc_backups.results | default([]) }}"
+  loop_control: {label: "{{ item.item.name | default('skipped') }}" }
+  when:
+    - tc_want_renew | bool
+    - item.item is defined
+
+- name: Read the most recent backup certificate
+  community.crypto.x509_certificate_info:
+    path: "{{ item.path }}"
+  delegate_to: "{{ tc_ipa_host }}"
+  become: true
+  loop: "{{ tc_prev_paths | default([]) | selectattr('path') | list }}"
+  loop_control: {label: "{{ item.name }}" }
+  register: tc_prev
+  failed_when: false
+  when: tc_want_renew | bool
+
+# Indexed by name rather than zipped, because a host that has never renewed has
+# no backup and the two lists would not line up.
+- name: Index the previous certificates by unit name
+  ansible.builtin.set_fact:
+    tc_prev_by_name: >-
+      {{ tc_prev_by_name | default({}) | combine({ item.item.name: item }) }}
+  loop: "{{ tc_prev.results | default([]) | rejectattr('failed') | list }}"
+  loop_control: {label: "{{ item.item.name }}" }
+  when: tc_want_renew | bool
+
+- name: Read certmonger tracking
   ansible.builtin.command:
     argv: [getcert, list]
   delegate_to: "{{ tc_ipa_host }}"
@@ -159,22 +261,17 @@
   changed_when: false
   failed_when: false
   register: tc_getcert
-  when: tc_query_ipa | bool
+  when: tc_want_renew | bool
 
-- name: Read the certificate profile
-  ansible.builtin.command:
-    argv: [ipa, certprofile-show, "{{ tc_profile_id }}"]
-  environment: {KRB5CCNAME: "{{ tc_krb5_ccache }}"}
-  delegate_to: "{{ tc_ipa_host }}"
-  become: true
-  changed_when: false
-  failed_when: false
-  register: tc_profile_show
-  when: tc_online | bool
-
-- name: Find the certmonger request covering this host
+# Matched on the certificate path, not the hostname, so a host with several
+# tracked certificates gets each one's own block rather than the first.
+- name: Find the certmonger request covering each certificate
   ansible.builtin.set_fact:
     tc_cm: >-
-      {{ ((tc_getcert.stdout | default('')).split('Request ID ')
-          | select('search', ansible_facts['fqdn'] | regex_escape)
-          | list | first | default('')) }}
+      {{ tc_cm | default({}) | combine({
+           item.name: ((tc_getcert.stdout | default('')).split('Request ID ')
+                       | select('search', item.crt | regex_escape)
+                       | list | first | default('')) }) }}
+  loop: "{{ tc_files }}"
+  loop_control: {label: "{{ item.name }}" }
+  when: tc_want_renew | bool
