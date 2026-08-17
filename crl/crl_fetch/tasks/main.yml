@@ -1,0 +1,9 @@
+---
+- name: Configure the CRL fetch service
+  ansible.builtin.import_tasks: configure.yml
+  tags: [crl_fetch, configure]
+
+- name: Verify the CRL fetch service
+  ansible.builtin.import_tasks: verify.yml
+  when: crl_fetch_run_on_deploy | bool
+  tags: [crl_fetch, verify]

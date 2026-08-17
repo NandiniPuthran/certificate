@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  role_name: apache_crl
+  description: >-
+    Serve a published CRL over plain HTTP from the relay host, answering both
+    the certificate CDP hostname and the relay's own name.
+  license: MIT
+  min_ansible_version: "2.12"
+  platforms:
+    - name: Debian
+      versions: [bullseye, bookworm]
+    - name: Ubuntu
+      versions: [focal, jammy, noble]
+dependencies: []

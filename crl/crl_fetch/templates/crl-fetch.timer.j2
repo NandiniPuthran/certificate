@@ -1,0 +1,26 @@
+# {{ ansible_managed }}
+#
+# WHEN to run it. This is the unit you enable — never crl-fetch.service.
+
+[Unit]
+Description=Periodic FreeIPA CRL fetch
+Requires=crl-fetch.service
+
+[Timer]
+# Every {{ crl_fetch_interval }}. The CA regenerates every 4h, so most runs
+# find an unchanged file and exit on the checksum comparison.
+OnCalendar={{ crl_fetch_interval }}
+
+# Jitter, so a fleet of relays would not hit the CA on the same second.
+# Note this also delays the first run after a restart by up to this long,
+# which is worth setting to 0 while testing by hand.
+RandomizedDelaySec={{ crl_fetch_randomized_delay }}
+
+# If the host was down or suspended over a scheduled slot, run once on the
+# next boot rather than silently waiting for the following interval.
+Persistent=true
+
+Unit=crl-fetch.service
+
+[Install]
+WantedBy=timers.target

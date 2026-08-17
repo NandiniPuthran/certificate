@@ -1,0 +1,69 @@
+---
+- name: Flush handlers so the config is live before testing
+  ansible.builtin.meta: flush_handlers
+
+# Confirms the CRL vhost did not displace an existing default vhost.
+- name: Show the resolved vhost map
+  ansible.builtin.command:
+    cmd: apache2ctl -S
+  register: _apache_crl_vhosts
+  changed_when: false
+
+- name: Report the vhost map
+  ansible.builtin.debug:
+    msg: "{{ _apache_crl_vhosts.stdout_lines + _apache_crl_vhosts.stderr_lines }}"
+
+# Tested via 127.0.0.1 with an explicit Host header, so this proves the vhost
+# is correct BEFORE site B DNS is cut over. The CDP name need not resolve yet.
+- name: Verify the CDP hostname serves the CRL
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ apache_crl_port }}{{ apache_crl_alias_path }}{{ apache_crl_filename }}"
+    method: GET
+    headers:
+      Host: "{{ apache_crl_servername }}"
+    return_content: false
+    status_code: [200]
+  register: _apache_crl_cdp_test
+  retries: 3
+  delay: 5
+  until: _apache_crl_cdp_test is succeeded
+
+# The fleet pulls via this host's own name, so the ServerAlias path matters as
+# much as the CDP name. A missing alias breaks 500 hosts while the CDP still works.
+- name: Verify each ServerAlias serves the CRL
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ apache_crl_port }}{{ apache_crl_alias_path }}{{ apache_crl_filename }}"
+    method: GET
+    headers:
+      Host: "{{ item }}"
+    return_content: false
+    status_code: [200]
+  loop: "{{ apache_crl_server_aliases }}"
+
+- name: Confirm the served bytes are a valid CRL
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      curl -sf -H 'Host: {{ apache_crl_servername }}'
+      http://127.0.0.1:{{ apache_crl_port }}{{ apache_crl_alias_path }}{{ apache_crl_filename }}
+      | openssl crl -inform DER -noout -lastupdate -nextupdate
+    executable: /bin/bash
+  register: _apache_crl_content
+  changed_when: false
+
+- name: Report the served CRL
+  ansible.builtin.debug:
+    msg: >-
+      Served as {{ _apache_crl_cdp_test.content_type | default('unknown') }}.
+      {{ _apache_crl_content.stdout_lines }}
+      Certificates must carry exactly:
+      http://{{ apache_crl_servername }}{{ apache_crl_alias_path }}{{ apache_crl_filename }}
+
+- name: Confirm directory listing is refused
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ apache_crl_port }}{{ apache_crl_alias_path }}"
+    method: GET
+    headers:
+      Host: "{{ apache_crl_servername }}"
+    status_code: [403, 404]
+  changed_when: false

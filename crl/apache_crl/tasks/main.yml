@@ -1,0 +1,9 @@
+---
+- name: Configure the CRL vhost
+  ansible.builtin.import_tasks: configure.yml
+  tags: [apache_crl, configure]
+
+- name: Verify the CRL vhost
+  ansible.builtin.import_tasks: verify.yml
+  when: apache_crl_run_on_deploy | bool
+  tags: [apache_crl, verify]

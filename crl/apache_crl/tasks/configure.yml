@@ -1,0 +1,130 @@
+---
+# ── Preflight ────────────────────────────────────────────────────────────
+- name: Preflight
+  tags: [preflight]
+  block:
+
+    - name: Assert the alias path and docroot are consistent
+      ansible.builtin.assert:
+        that:
+          - apache_crl_alias_path.startswith('/')
+          - apache_crl_alias_path.endswith('/')
+          - apache_crl_docroot | length > 0
+        fail_msg: >-
+          apache_crl_alias_path must start and end with '/' or Alias will not
+          match the CDP path embedded in your certificates.
+        quiet: true
+
+    # The CDP URI carries no port, which means 80. If anything else holds it,
+    # the whole no-reissuance design is invalid — find out here, not at cutover.
+    - name: Check what is bound to the CDP port
+      ansible.builtin.shell:
+        cmd: "ss -tlnH '( sport = :{{ apache_crl_port }} )' | awk '{print $1, $4}'"
+        executable: /bin/bash
+      register: _apache_crl_port_check
+      changed_when: false
+      failed_when: false
+
+    - name: Report the port state
+      ansible.builtin.debug:
+        msg: >-
+          {% if _apache_crl_port_check.stdout | trim | length == 0 %}
+          Port {{ apache_crl_port }} is free.
+          {% else %}
+          Port {{ apache_crl_port }} already bound: {{ _apache_crl_port_check.stdout_lines | join('; ') }}.
+          If that is apache2 this is fine — name-based vhosts share a port. If
+          it is another service, Apache cannot bind and this design needs a
+          second IP or a reissued CDP.
+          {% endif %}
+
+    # crl_fetch owns this directory. If it is missing, crl_fetch has not run.
+    - name: Check the publish directory exists
+      ansible.builtin.stat:
+        path: "{{ apache_crl_docroot }}"
+      register: _apache_crl_docroot_stat
+
+    - name: Fail if the publish directory is missing
+      ansible.builtin.fail:
+        msg: >-
+          {{ apache_crl_docroot }} does not exist. It is created and populated
+          by crl_fetch — run that role on this host first. apache_crl only
+          serves the directory, it does not create or fill it.
+      when: not _apache_crl_docroot_stat.stat.exists
+
+    - name: Check whether a CRL has been published yet
+      ansible.builtin.stat:
+        path: "{{ apache_crl_docroot }}/{{ apache_crl_filename }}"
+      register: _apache_crl_file_stat
+
+    - name: Note when no CRL is present yet
+      ansible.builtin.debug:
+        msg: >-
+          {{ apache_crl_docroot }}/{{ apache_crl_filename }} does not exist yet.
+          The vhost will serve 404 until crl_fetch completes a successful run.
+      when: not _apache_crl_file_stat.stat.exists
+
+# ── Install ──────────────────────────────────────────────────────────────
+- name: Install apache2 and modules
+  tags: [install]
+  block:
+
+    - name: Install apache2
+      ansible.builtin.package:
+        name: apache2
+        state: present
+
+    # mod_ssl is deliberately NOT enabled — this vhost serves plain HTTP.
+    - name: Enable required apache modules
+      community.general.apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - headers
+        - alias
+      notify: Reload apache2
+
+    - name: Create the empty document root
+      ansible.builtin.file:
+        path: "{{ apache_crl_empty_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+# ── Configure ────────────────────────────────────────────────────────────
+- name: Configure the vhost
+  tags: [config]
+  block:
+
+    - name: Deploy the CRL vhost
+      ansible.builtin.template:
+        src: ipa-crl-vhost.conf.j2
+        dest: "/etc/apache2/sites-available/{{ apache_crl_conf_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+        validate: "apache2ctl -t -f %s"
+      notify: Reload apache2
+
+    - name: Enable the CRL vhost
+      ansible.builtin.file:
+        src: "/etc/apache2/sites-available/{{ apache_crl_conf_name }}"
+        dest: "/etc/apache2/sites-enabled/{{ apache_crl_conf_name }}"
+        state: link
+      notify: Reload apache2
+
+    # Off by default. Leaving 000-default enabled keeps it as the catch-all for
+    # unmatched Host headers, which is safer than letting the CRL vhost answer
+    # for every name that happens to resolve here.
+    - name: Disable the default site
+      ansible.builtin.file:
+        path: /etc/apache2/sites-enabled/000-default.conf
+        state: absent
+      when: apache_crl_disable_default_site | bool
+      notify: Reload apache2
+
+    - name: Ensure apache2 is running and enabled
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: true

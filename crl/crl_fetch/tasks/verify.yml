@@ -1,0 +1,56 @@
+---
+# Prove it works now, rather than discovering at 03:00 that the CA pin is wrong.
+
+- name: Run one fetch synchronously
+  ansible.builtin.command:
+    cmd: /usr/local/sbin/crl-fetch
+  become: true
+  become_user: "{{ crl_fetch_user }}"
+  register: _crl_fetch_run
+  changed_when: "'published CRL number' in _crl_fetch_run.stderr"
+  failed_when: _crl_fetch_run.rc != 0
+
+- name: Confirm a CRL is present
+  ansible.builtin.stat:
+    path: "{{ crl_fetch_publish_dir }}/{{ crl_fetch_filename }}"
+  register: _crl_fetch_published
+
+- name: Fail if nothing was published
+  ansible.builtin.fail:
+    msg: >-
+      The fetch exited 0 but {{ crl_fetch_publish_dir }}/{{ crl_fetch_filename }}
+      does not exist. Check journalctl -t crl-fetch.
+  when: not _crl_fetch_published.stat.exists
+
+- name: Read back the published CRL
+  ansible.builtin.command:
+    cmd: >-
+      openssl crl -inform DER
+      -in {{ crl_fetch_publish_dir }}/{{ crl_fetch_filename }}
+      -noout -issuer -lastupdate -nextupdate
+  register: _crl_fetch_window
+  changed_when: false
+
+- name: Re-verify the published CRL against the CA independently of the script
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      openssl crl -inform DER
+      -in {{ crl_fetch_publish_dir }}/{{ crl_fetch_filename }}
+      -CAfile {{ crl_fetch_ca_cert }} -noout 2>&1 | grep -q 'verify OK'
+    executable: /bin/bash
+  changed_when: false
+
+- name: Show the published CRL and next run
+  ansible.builtin.debug:
+    msg: "{{ _crl_fetch_window.stdout_lines }}"
+
+- name: Show the timer schedule
+  ansible.builtin.command:
+    cmd: systemctl list-timers crl-fetch.timer --no-pager
+  register: _crl_fetch_timers
+  changed_when: false
+
+- name: Report timer schedule
+  ansible.builtin.debug:
+    msg: "{{ _crl_fetch_timers.stdout_lines }}"

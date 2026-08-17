@@ -1,0 +1,206 @@
+---
+
+# ───────────────────────────────────────────────────────────────────────
+# Preflight — fail before touching anything
+# Everything here fails the play rather than deploying a relay that cannot work.
+# ───────────────────────────────────────────────────────────────────────
+- name: Preflight — fail before touching anything
+  tags: [preflight]
+  block:
+    - name: Assert the source URL is sane
+      ansible.builtin.assert:
+        that:
+          - crl_fetch_source_url is match('^https?://')
+          - "'ipa-ca' not in crl_fetch_source_url"
+        fail_msg: >-
+          crl_fetch_source_url must be an http(s) URL and must NOT point at
+          ipa-ca.example.com — that name resolves to this host once the site B DNS
+          override is in place, so the relay would end up fetching from itself.
+          Use the CA's own FQDN.
+        quiet: true
+
+    - name: Install required packages
+      ansible.builtin.package:
+        name:
+          - curl
+          - openssl
+          - util-linux          # flock
+        state: present
+
+    - name: Check the CA certificate exists
+      ansible.builtin.stat:
+        path: "{{ crl_fetch_ca_cert }}"
+      register: _crl_fetch_ca
+
+    - name: Fail if the CA certificate is missing
+      ansible.builtin.fail:
+        msg: >-
+          {{ crl_fetch_ca_cert }} not found. The CRL is fetched over plain HTTP,
+          so the CA signature check is the only thing that makes it trustworthy.
+          This role cannot run without it.
+      when: not _crl_fetch_ca.stat.exists
+
+    - name: Confirm the CA certificate parses
+      ansible.builtin.command:
+        cmd: "openssl x509 -in {{ crl_fetch_ca_cert }} -noout -subject -enddate"
+      register: _crl_fetch_ca_info
+      changed_when: false
+
+    - name: Show the trust anchor this host will pin against
+      ansible.builtin.debug:
+        msg: "{{ _crl_fetch_ca_info.stdout_lines }}"
+
+    - name: Verify the CA is reachable and does not redirect to HTTPS
+      ansible.builtin.uri:
+        url: "{{ crl_fetch_source_url }}"
+        method: HEAD
+        follow_redirects: none
+        status_code: [200]
+        timeout: "{{ crl_fetch_timeout }}"
+      register: _crl_fetch_reach
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if the CA did not return the CRL cleanly
+      ansible.builtin.fail:
+        msg: >-
+          HEAD {{ crl_fetch_source_url }} returned
+          {{ _crl_fetch_reach.status | default('no response') }}.
+          A 301/302 means FreeIPA is redirecting /ipa/crl/ to HTTPS — the fetch
+          script uses --max-redirs 0 and will fail closed. A timeout means the WAN
+          path or firewall is not open.
+      when: _crl_fetch_reach.status | default(0) != 200
+
+
+# ───────────────────────────────────────────────────────────────────────
+# User, directories and log rotation
+# ───────────────────────────────────────────────────────────────────────
+- name: User, directories and log rotation
+  tags: [layout]
+  block:
+    - name: Create the service group
+      ansible.builtin.group:
+        name: "{{ crl_fetch_group }}"
+        system: true
+        state: present
+
+    - name: Create the service user
+      ansible.builtin.user:
+        name: "{{ crl_fetch_user }}"
+        group: "{{ crl_fetch_group }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ crl_fetch_home }}"
+        create_home: true
+        state: present
+
+    - name: Create working directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ crl_fetch_user }}"
+        group: "{{ crl_fetch_group }}"
+        mode: "0750"
+      loop:
+        - "{{ crl_fetch_home }}"
+        - "{{ crl_fetch_staging_dir }}"
+        - "{{ crl_fetch_state_dir }}"
+        - "{{ crl_fetch_log_dir }}"
+
+    # 0755 so a web server user can read it later without being in the group.
+    - name: Create the publish directory
+      ansible.builtin.file:
+        path: "{{ crl_fetch_publish_dir }}"
+        state: directory
+        owner: "{{ crl_fetch_user }}"
+        group: "{{ crl_fetch_group }}"
+        mode: "0755"
+
+    - name: Install log rotation
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/crl-fetch
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {{ crl_fetch_log_dir }}/*.log {
+              weekly
+              rotate 8
+              compress
+              missingok
+              notifempty
+              create 0640 {{ crl_fetch_user }} {{ crl_fetch_group }}
+          }
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Scripts
+# ───────────────────────────────────────────────────────────────────────
+- name: Scripts
+  tags: [scripts]
+  block:
+    - name: Deploy the fetch script
+      ansible.builtin.template:
+        src: crl-fetch.sh.j2
+        dest: /usr/local/sbin/crl-fetch
+        owner: root
+        group: "{{ crl_fetch_group }}"
+        mode: "0750"
+        validate: "bash -n %s"
+      notify: Restart crl-fetch timer
+
+    - name: Deploy the service reload script
+      ansible.builtin.template:
+        src: crl-reload.sh.j2
+        dest: /usr/local/sbin/crl-reload
+        owner: root
+        group: root
+        mode: "0750"
+        validate: "bash -n %s"
+      when: crl_fetch_reload_services | length > 0
+      notify: Restart crl-fetch timer
+
+    - name: Remove the reload script when no services are configured
+      ansible.builtin.file:
+        path: /usr/local/sbin/crl-reload
+        state: absent
+      when: crl_fetch_reload_services | length == 0
+
+    - name: Warn when no reload services are configured
+      ansible.builtin.debug:
+        msg: >-
+          crl_fetch_reload_services is empty on this host. The CRL will be written
+          to {{ crl_fetch_publish_dir }} but no service is told about it. Expected
+          on the relay; on a fleet host it means the update has no practical effect.
+      when: crl_fetch_reload_services | length == 0
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Systemd units and timer
+# ───────────────────────────────────────────────────────────────────────
+- name: Systemd units and timer
+  tags: [timer]
+  block:
+    - name: Deploy the systemd units
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - crl-fetch.service
+        - crl-fetch.timer
+      notify:
+        - Reload systemd
+        - Restart crl-fetch timer
+
+    - name: Flush handlers so units are loaded before enabling
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start the fetch timer
+      ansible.builtin.systemd:
+        name: crl-fetch.timer
+        enabled: true
+        state: started
+        daemon_reload: true

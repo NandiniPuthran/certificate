@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  role_name: crl_fetch
+  description: >-
+    Fetch the FreeIPA CRL over the WAN, validate it against the CA, and
+    publish it atomically to local disk on a systemd timer.
+  license: MIT
+  min_ansible_version: "2.12"
+  platforms:
+    - name: Debian
+      versions: [bullseye, bookworm]
+    - name: Ubuntu
+      versions: [focal, jammy, noble]
+dependencies: []

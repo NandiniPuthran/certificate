@@ -1,0 +1,130 @@
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Fetch the FreeIPA CRL, verify the CA signed it, publish it if it is newer.
+#
+# Transport is plain HTTP by design — a CRL distribution point served over TLS
+# is a bootstrap loop. That means there is no transport security at all, and
+# the CA signature is the only thing distinguishing the real CRL from anything
+# else that could end up on the wire.
+#
+# Fails closed: if anything goes wrong the previously published CRL stays
+# exactly where it is. Stale-but-genuine always beats unproven.
+
+set -euo pipefail
+
+SOURCE_URL="{{ crl_fetch_source_url }}"
+TIMEOUT="{{ crl_fetch_timeout }}"
+CA_CERT="{{ crl_fetch_ca_cert }}"
+STAGING="{{ crl_fetch_staging_dir }}"
+STATE="{{ crl_fetch_state_dir }}"
+PUBLISH="{{ crl_fetch_publish_dir }}"
+CRL_DER="{{ crl_fetch_filename }}"
+CRL_PEM="{{ crl_fetch_pem_filename }}"
+PUBLISH_MODE="{{ crl_fetch_publish_mode }}"
+WARN_AFTER="{{ crl_fetch_warn_after_seconds }}"
+LOCKFILE="${STATE}/fetch.lock"
+ON_CHANGE_HOOK="{{ crl_fetch_on_change_hook }}"
+
+log() { logger -t crl-fetch -p "daemon.$1" -- "$2"; printf '%s [%s] %s\n' "$(date -Is)" "$1" "$2" >&2; }
+
+# Every failure path comes through here. Beyond logging the reason, it reports
+# how long it has been since a fetch last worked and escalates when that gets
+# long — which is the alerting that used to live in a separate script.
+#
+# With nextUpdate set to a year, a broken fetch no longer announces itself:
+# nothing downstream will start erroring, so this message is the only signal
+# that revocation data has stopped updating.
+die() {
+    log err "$1"
+    if [ -f "${STATE}/last-success" ]; then
+        AGE=$(( $(date +%s) - $(cat "${STATE}/last-success") ))
+        if [ "$AGE" -ge "$WARN_AFTER" ]; then
+            log crit "STALE: no successful fetch for $(( AGE / 3600 ))h — revocation data is no longer being updated"
+        else
+            log warning "last successful fetch was $(( AGE / 60 )) minutes ago"
+        fi
+    else
+        log crit "STALE: no fetch has ever succeeded on this host"
+    fi
+    exit 1
+}
+
+# A slow WAN fetch can outlive its own interval; a second run exits quietly
+# rather than racing on the publish directory.
+exec 9>"$LOCKFILE"
+flock -n 9 || { log warning "a fetch is already running; skipping"; exit 0; }
+
+WORKDIR="$(mktemp -d "${STAGING}/run.XXXXXXXX")"
+trap 'rm -rf "$WORKDIR"' EXIT
+INCOMING="${WORKDIR}/${CRL_DER}"
+
+# ── 1. Download ──────────────────────────────────────────────────────────
+# --fail keeps an HTTP error page out of the file; --max-redirs 0 stops a
+# redirect quietly repointing us at a different host.
+curl --fail --silent --show-error --location --max-redirs 0 \
+     --max-time "$TIMEOUT" --output "$INCOMING" "$SOURCE_URL" \
+     || die "download failed from ${SOURCE_URL}"
+
+# ── 2. Checksum — cheapest possible exit ─────────────────────────────────
+# The CA regenerates every 4h and this runs every 3h, so most runs find the
+# same file. Comparing hashes first avoids parsing and verifying needlessly.
+if [ -f "${PUBLISH}/${CRL_DER}" ]; then
+    NEW_SUM="$(sha256sum "$INCOMING" | cut -d' ' -f1)"
+    CUR_SUM="$(sha256sum "${PUBLISH}/${CRL_DER}" | cut -d' ' -f1)"
+    if [ "$NEW_SUM" = "$CUR_SUM" ]; then
+        log info "CRL unchanged; nothing to publish"
+        date +%s > "${STATE}/last-success"
+        exit 0
+    fi
+fi
+
+# ── 3. Signature ─────────────────────────────────────────────────────────
+# The one check that cannot be dropped. A checksum proves the file changed and
+# a timestamp proves it is newer, but neither can tell a genuine CRL from a
+# forged empty one dated today — which would revoke nothing and pass both.
+# There is no TLS on this path; this is the entire security boundary.
+openssl crl -inform DER -in "$INCOMING" -CAfile "$CA_CERT" -noout 2>&1 \
+    | grep -q 'verify OK' \
+    || die "CRL signature did not verify against ${CA_CERT} — refusing to publish"
+
+# ── 4. Newer than what we already serve ──────────────────────────────────
+# lastUpdate, not nextUpdate: nextUpdate is derived from the CA's grace period,
+# so changing nextUpdateGracePeriod would shift the ordering. lastUpdate is the
+# actual generation time and only ever moves forward.
+NEW_LAST_RAW="$(openssl crl -inform DER -in "$INCOMING" -noout -lastupdate 2>/dev/null | cut -d= -f2-)"
+NEW_LAST="$(date -d "$NEW_LAST_RAW" +%s 2>/dev/null)" \
+    || die "could not read lastUpdate from the downloaded CRL"
+
+if [ -f "${PUBLISH}/${CRL_DER}" ]; then
+    CUR_LAST_RAW="$(openssl crl -inform DER -in "${PUBLISH}/${CRL_DER}" -noout -lastupdate 2>/dev/null | cut -d= -f2-)"
+    CUR_LAST="$(date -d "$CUR_LAST_RAW" +%s 2>/dev/null || echo 0)"
+    [ "$NEW_LAST" -gt "$CUR_LAST" ] \
+        || die "downloaded CRL is not newer (${NEW_LAST_RAW} vs published ${CUR_LAST_RAW}) — refusing to replace"
+fi
+
+# ── 5. Publish atomically ────────────────────────────────────────────────
+# Write beside the target, then rename, so a reader can never open the file
+# mid-write and get half a CRL.
+install -m "$PUBLISH_MODE" "$INCOMING" "${PUBLISH}/.${CRL_DER}.incoming"
+mv -f "${PUBLISH}/.${CRL_DER}.incoming" "${PUBLISH}/${CRL_DER}"
+
+{% if crl_fetch_publish_pem %}
+openssl crl -inform DER -in "$INCOMING" -outform PEM -out "${WORKDIR}/${CRL_PEM}"
+install -m "$PUBLISH_MODE" "${WORKDIR}/${CRL_PEM}" "${PUBLISH}/.${CRL_PEM}.incoming"
+mv -f "${PUBLISH}/.${CRL_PEM}.incoming" "${PUBLISH}/${CRL_PEM}"
+{% endif %}
+
+date +%s > "${STATE}/last-success"
+log notice "published CRL generated ${NEW_LAST_RAW}"
+
+# ── 6. Hand off downstream ───────────────────────────────────────────────
+# Only runs when the CRL actually changed. A hook failure is logged but does
+# not fail this run: keeping a good CRL locally must not depend on
+# distribution working.
+if [ -n "$ON_CHANGE_HOOK" ] && [ -x "$ON_CHANGE_HOOK" ]; then
+    log info "running on-change hook ${ON_CHANGE_HOOK}"
+    "$ON_CHANGE_HOOK" || log err "on-change hook ${ON_CHANGE_HOOK} failed"
+fi
+
+exit 0

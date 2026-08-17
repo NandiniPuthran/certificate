@@ -1,0 +1,51 @@
+---
+# ═══════════════════════════════════════════════════════════════════════
+# apache_crl — serve the published CRL over plain HTTP from server1.
+#
+# Two audiences, one vhost:
+#   1. The CDP baked into every issued certificate:
+#        http://ipa-ca.example.com/ipa/crl/MasterCRL.bin
+#      Site B DNS resolves that name to this host.
+#   2. The 500-host fleet, which pulls the same file via crl_fetch using this
+#      server's OWN hostname (see apache_crl_server_aliases).
+#
+# Runs on server1 only, after crl_fetch has populated the docroot.
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── Identity ─────────────────────────────────────────────────────────────
+# LOCKED: no port in the CDP URI means port 80, and that string is immutable
+# in every certificate already in the field. Neither is a configuration choice.
+apache_crl_servername: ipa-ca.example.com
+apache_crl_port: 80
+
+# The fleet fetches from this server's real hostname rather than the CDP alias,
+# so distribution works whether or not the DNS override has been cut over, and
+# the two changes can be rolled back independently. That only works if the
+# vhost also answers for this name.
+apache_crl_server_aliases:
+  - "{{ ansible_fqdn }}"
+
+# ── Paths ────────────────────────────────────────────────────────────────
+# CONTRACT: apache_crl_docroot must equal crl_fetch_publish_dir on this host,
+# and apache_crl_alias_path must match the CDP path character for character.
+apache_crl_docroot: /var/www/crl
+apache_crl_alias_path: /ipa/crl/
+apache_crl_filename: MasterCRL.bin
+
+# Only the alias path serves anything. Pointing DocumentRoot at the CRL
+# directory instead would expose the file at two different URLs.
+apache_crl_empty_root: /var/www/empty
+
+# ── Access ───────────────────────────────────────────────────────────────
+# Empty means open within the infra. Populate with CIDRs to restrict.
+apache_crl_allow_from: []
+
+# ── Config file name ─────────────────────────────────────────────────────
+# Debian loads sites-enabled alphabetically and the FIRST vhost on a port
+# becomes the catch-all for unmatched Host headers. The zz- prefix keeps this
+# from displacing an existing default vhost.
+apache_crl_conf_name: zz-ipa-crl.conf
+
+# ── Behaviour ────────────────────────────────────────────────────────────
+apache_crl_disable_default_site: false   # leave 000-default as the catch-all
+apache_crl_run_on_deploy: true           # fetch the CDP at the end of the play

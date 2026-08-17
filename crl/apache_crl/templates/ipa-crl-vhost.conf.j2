@@ -1,0 +1,85 @@
+# {{ ansible_managed }}
+#
+# CRL distribution point.
+#
+# This is NOT a redirect. Alias maps the CDP path onto the directory crl_fetch
+# publishes to, so the request is answered straight off disk.
+#
+# Serves two audiences:
+#   {{ apache_crl_servername }}  — the CDP baked into every issued certificate
+{% for alias in apache_crl_server_aliases %}
+#   {{ alias }}  — the fleet's crl_fetch pull
+{% endfor %}
+#
+# Plain HTTP is deliberate. A CDP served over TLS is a bootstrap loop: a client
+# that cannot yet validate a chain cannot fetch the CRL it needs in order to
+# validate that chain. Integrity comes from the CA signature on the CRL itself,
+# which every consumer verifies independently after download.
+{% if apache_crl_port | int != 80 %}
+
+# Debian's ports.conf already contains "Listen 80", so a Listen directive is
+# only added here for a non-standard port.
+Listen {{ apache_crl_port }}
+{% endif %}
+
+<VirtualHost *:{{ apache_crl_port }}>
+    ServerName {{ apache_crl_servername }}
+{% for alias in apache_crl_server_aliases %}
+    ServerAlias {{ alias }}
+{% endfor %}
+
+    # Deliberately an empty directory: only the alias path below serves
+    # anything, so nothing else on this host is reachable through this vhost.
+    DocumentRoot {{ apache_crl_empty_root }}
+
+    Alias {{ apache_crl_alias_path }} {{ apache_crl_docroot }}/
+
+    <Directory {{ apache_crl_docroot }}>
+        # No directory listing — consumers request a known filename, and an
+        # index only leaks whatever else ends up in the docroot.
+        Options -Indexes -FollowSymLinks
+        AllowOverride None
+{% if apache_crl_allow_from | length > 0 %}
+        <RequireAny>
+{% for cidr in apache_crl_allow_from %}
+            Require ip {{ cidr }}
+{% endfor %}
+        </RequireAny>
+{% else %}
+        Require all granted
+{% endif %}
+    </Directory>
+
+    # Some verifiers reject a CRL served as text/plain or as a download stream.
+    AddType application/pkix-crl .bin .crl
+    AddType application/x-pem-file .pem
+
+    # A CRL is superseded on a schedule, so caching past that point is actively
+    # harmful. Over plain HTTP this matters more than usual: any transparent
+    # proxy on the path is a candidate for serving a superseded CRL that no
+    # longer lists a freshly revoked certificate.
+    <FilesMatch "\.(bin|crl|pem)$">
+        Header set Cache-Control "no-cache, no-store, must-revalidate"
+        Header set Pragma "no-cache"
+    </FilesMatch>
+
+    # This vhost is a file server for one directory.
+    <LimitExcept GET HEAD>
+        Require all denied
+    </LimitExcept>
+
+    # OCSP is deliberately not served here. The DNS override captures OCSP
+    # traffic for {{ apache_crl_servername }} as well, so those requests land on
+    # this host and receive 404. Chromium is configured with
+    # RequireOnlineRevocationChecksForLocalAnchors=false, so it soft-fails and
+    # continues. Revisit only if a client is found that hard-fails on OCSP.
+
+    # The access log is the fleet's distribution inventory: every crl_fetch pull
+    # appears here, recording what actually arrived rather than what this host
+    # believed it sent. See the README for the staleness query.
+    ErrorLog  ${APACHE_LOG_DIR}/ipa-crl-error.log
+    CustomLog ${APACHE_LOG_DIR}/ipa-crl-access.log combined
+
+    ServerSignature Off
+    TraceEnable Off
+</VirtualHost>
