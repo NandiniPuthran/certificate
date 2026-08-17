@@ -1,56 +1,218 @@
----
-# roles/crl_consumer/tasks/pull_script_setup.yml
+#!/bin/bash
+# {{ ansible_managed }}
 #
-# Deploys the CRL pull script plus its systemd service/timer.
-# This runs on every non-FreeIPA target host, fetching from the
-# IT server's Apache (not FreeIPA directly — these hosts can't
-# reach FreeIPA at all, by design).
+# Fetch the FreeIPA CRL, verify the CA signed it, publish it if it is newer.
+#
+# Transport is plain HTTP by design â€” a CRL distribution point served over TLS
+# is a bootstrap loop. That means there is no transport security at all, and
+# the CA signature is the only thing distinguishing the real CRL from anything
+# else that could end up on the wire.
+#
+# Fails closed: if anything goes wrong the previously published CRL stays
+# exactly where it is. Stale-but-genuine always beats unproven.
 
-- name: Create local CRL directory
-  ansible.builtin.file:
-    path: "{{ crl_consumer_local_crl_dir }}"
-    state: directory
-    mode: "0755"
-    owner: root
-    group: root
+set -euo pipefail
 
-- name: Deploy CRL pull script
+SOURCE_URL="{{ crl_fetch_source_url }}"
+TIMEOUT="{{ crl_fetch_timeout }}"
+CA_CERT="{{ crl_fetch_ca_cert }}"
+STAGING="{{ crl_fetch_staging_dir }}"
+STATE="{{ crl_fetch_state_dir }}"
+PUBLISH="{{ crl_fetch_publish_dir }}"
+CRL_DER="{{ crl_fetch_filename }}"
+CRL_PEM="{{ crl_fetch_pem_filename }}"
+PUBLISH_MODE="{{ crl_fetch_publish_mode }}"
+WARN_AFTER="{{ crl_fetch_warn_after_seconds }}"
+LOCKFILE="${STATE}/fetch.lock"
+ON_CHANGE_HOOK="{{ crl_fetch_on_change_hook }}"
+
+log() { logger -t crl-fetch -p "daemon.$1" -- "$2"; printf '%s [%s] %s\n' "$(date -Is)" "$1" "$2" >&2; }
+
+# Every failure path comes through here. Beyond logging the reason, it reports
+# how long it has been since a fetch last worked and escalates when that gets
+# long â€” which is the alerting that used to live in a separate script.
+#
+# With nextUpdate set to a year, a broken fetch no longer announces itself:
+# nothing downstream will start erroring, so this message is the only signal
+# that revocation data has stopped updating.
+die() {
+    log err "$1"
+    if [ -f "${STATE}/last-success" ]; then
+        AGE=$(( $(date +%s) - $(cat "${STATE}/last-success") ))
+        if [ "$AGE" -ge "$WARN_AFTER" ]; then
+            log crit "STALE: no successful fetch for $(( AGE / 3600 ))h â€” revocation data is no longer being updated"
+        else
+            log warning "last successful fetch was $(( AGE / 60 )) minutes ago"
+        fi
+    else
+        log crit "STALE: no fetch has ever succeeded on this host"
+    fi
+    exit 1
+}
+
+# A slow WAN fetch can outlive its own interval; a second run exits quietly
+# rather than racing on the publish directory.
+exec 9>"$LOCKFILE"
+flock -n 9 || { log warning "a fetch is already running; skipping"; exit 0; }
+
+WORKDIR="$(mktemp -d "${STAGING}/run.XXXXXXXX")"
+trap 'rm -rf "$WORKDIR"' EXIT
+INCOMING="${WORKDIR}/${CRL_DER}"
+
+# â”€â”€ 1. Download â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# --fail keeps an HTTP error page out of the file; --max-redirs 0 stops a
+# redirect quietly repointing us at a different host.
+curl --fail --silent --show-error --location --max-redirs 0 \
+     --max-time "$TIMEOUT" --output "$INCOMING" "$SOURCE_URL" \
+     || die "download failed from ${SOURCE_URL}"
+
+# â”€â”€ 2. Checksum â€” cheapest possible exit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# The CA regenerates every 4h and this runs every 3h, so most runs find the
+# same file. Comparing hashes first avoids parsing and verifying needlessly.
+if [ -f "${PUBLISH}/${CRL_DER}" ]; then
+    NEW_SUM="$(sha256sum "$INCOMING" | cut -d' ' -f1)"
+    CUR_SUM="$(sha256sum "${PUBLISH}/${CRL_DER}" | cut -d' ' -f1)"
+    if [ "$NEW_SUM" = "$CUR_SUM" ]; then
+        log info "CRL unchanged; nothing to publish"
+        date +%s > "${STATE}/last-success"
+        exit 0
+    fi
+fi
+
+# â”€â”€ 3. Signature â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# The one check that cannot be dropped. A checksum proves the file changed and
+# a timestamp proves it is newer, but neither can tell a genuine CRL from a
+# forged empty one dated today â€” which would revoke nothing and pass both.
+# There is no TLS on this path; this is the entire security boundary.
+openssl crl -inform DER -in "$INCOMING" -CAfile "$CA_CERT" -noout 2>&1 \
+    | grep -q 'verify OK' \
+    || die "CRL signature did not verify against ${CA_CERT} â€” refusing to publish"
+
+# â”€â”€ 4. Newer than what we already serve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# lastUpdate, not nextUpdate: nextUpdate is derived from the CA's grace period,
+# so changing nextUpdateGracePeriod would shift the ordering. lastUpdate is the
+# actual generation time and only ever moves forward.
+NEW_LAST_RAW="$(openssl crl -inform DER -in "$INCOMING" -noout -lastupdate 2>/dev/null | cut -d= -f2-)"
+NEW_LAST="$(date -d "$NEW_LAST_RAW" +%s 2>/dev/null)" \
+    || die "could not read lastUpdate from the downloaded CRL"
+
+if [ -f "${PUBLISH}/${CRL_DER}" ]; then
+    CUR_LAST_RAW="$(openssl crl -inform DER -in "${PUBLISH}/${CRL_DER}" -noout -lastupdate 2>/dev/null | cut -d= -f2-)"
+    CUR_LAST="$(date -d "$CUR_LAST_RAW" +%s 2>/dev/null || echo 0)"
+    [ "$NEW_LAST" -gt "$CUR_LAST" ] \
+        || die "downloaded CRL is not newer (${NEW_LAST_RAW} vs published ${CUR_LAST_RAW}) â€” refusing to replace"
+fi
+
+# â”€â”€ 5. Publish atomically â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Write beside the target, then rename, so a reader can never open the file
+# mid-write and get half a CRL.
+install -m "$PUBLISH_MODE" "$INCOMING" "${PUBLISH}/.${CRL_DER}.incoming"
+mv -f "${PUBLISH}/.${CRL_DER}.incoming" "${PUBLISH}/${CRL_DER}"
+
+{% if crl_fetch_publish_pem %}
+openssl crl -inform DER -in "$INCOMING" -outform PEM -out "${WORKDIR}/${CRL_PEM}"
+install -m "$PUBLISH_MODE" "${WORKDIR}/${CRL_PEM}" "${PUBLISH}/.${CRL_PEM}.incoming"
+mv -f "${PUBLISH}/.${CRL_PEM}.incoming" "${PUBLISH}/${CRL_PEM}"
+{% endif %}
+
+date +%s > "${STATE}/last-success"
+log notice "published CRL generated ${NEW_LAST_RAW}"
+
+# â”€â”€ 6. Hand off downstream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Only runs when the CRL actually changed. A hook failure is logged but does
+# not fail this run: keeping a good CRL locally must not depend on
+# distribution working.
+if [ -n "$ON_CHANGE_HOOK" ] && [ -x "$ON_CHANGE_HOOK" ]; then
+    log info "running on-change hook ${ON_CHANGE_HOOK}"
+    "$ON_CHANGE_HOOK" || log err "on-change hook ${ON_CHANGE_HOOK} failed"
+fi
+
+exit 0
+
+
+
+
+
+# {{ ansible_managed }}
+#
+# WHAT to run. This unit has no schedule â€” crl-fetch.timer triggers it.
+# Deliberately no [Install] section: this service should only ever be started
+# by its timer or by hand, never wired into a boot target.
+
+[Unit]
+Description=Fetch and validate the FreeIPA CRL
+Documentation=file://{{ crl_fetch_home }}
+# The fetch crosses the WAN, so wait for real connectivity rather than just
+# for the network stack to exist.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ crl_fetch_user }}
+Group={{ crl_fetch_group }}
+ExecStart=/usr/local/sbin/crl-fetch
+
+# The script's own curl timeout is {{ crl_fetch_timeout }}s. Give systemd
+# headroom beyond that so a slow-but-progressing fetch is not killed mid-run.
+TimeoutStartSec={{ (crl_fetch_timeout | int) + 300 }}
+
+# â”€â”€ Sandboxing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# This service reaches across the WAN and writes into a directory a web server
+# will later serve. Keep what it can touch to the minimum.
+#
+# ProtectSystem=strict makes the entire filesystem read-only, so ReadWritePaths
+# below is not optional â€” anything missing from it produces a "Read-only file
+# system" error at runtime, not at deploy time.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths={{ crl_fetch_staging_dir }} {{ crl_fetch_state_dir }} {{ crl_fetch_publish_dir }} {{ crl_fetch_log_dir }}
+
+
+
+# {{ ansible_managed }}
+#
+# WHEN to run it. This is the unit you enable â€” never crl-fetch.service.
+
+[Unit]
+Description=Periodic FreeIPA CRL fetch
+Requires=crl-fetch.service
+
+[Timer]
+# Every {{ crl_fetch_interval }}. The CA regenerates every 4h, so most runs
+# find an unchanged file and exit on the checksum comparison.
+OnCalendar={{ crl_fetch_interval }}
+
+# Jitter, so a fleet of relays would not hit the CA on the same second.
+# Note this also delays the first run after a restart by up to this long,
+# which is worth setting to 0 while testing by hand.
+RandomizedDelaySec={{ crl_fetch_randomized_delay }}
+
+# If the host was down or suspended over a scheduled slot, run once on the
+# next boot rather than silently waiting for the following interval.
+Persistent=true
+
+Unit=crl-fetch.service
+
+[Install]
+WantedBy=timers.target
+
+
+---
+- name: Deploy the fetch script
   ansible.builtin.template:
-    src: fetch_crl_from_it_server.sh.j2
-    dest: "{{ crl_consumer_script_path }}"
+    src: crl-fetch.sh.j2
+    dest: /usr/local/sbin/crl-fetch
+    owner: root
+    group: "{{ crl_fetch_group }}"
     mode: "0750"
-    owner: root
-    group: root
-
-- name: Create log file with correct permissions
-  ansible.builtin.file:
-    path: "{{ crl_consumer_log_path }}"
-    state: touch
-    mode: "0644"
-    owner: root
-    group: root
-    access_time: preserve
-    modification_time: preserve
-
-- name: Deploy systemd service unit
-  ansible.builtin.template:
-    src: crl-pull.service.j2
-    dest: /etc/systemd/system/crl-pull.service
-    mode: "0644"
-  notify: reload systemd
-
-- name: Deploy systemd timer unit
-  ansible.builtin.template:
-    src: crl-pull.timer.j2
-    dest: /etc/systemd/system/crl-pull.timer
-    mode: "0644"
-  notify: reload systemd
-
-- name: Flush handlers so systemd picks up new units before enabling
-  ansible.builtin.meta: flush_handlers
-
-- name: Enable and start the CRL pull timer
-  ansible.builtin.systemd:
-    name: crl-pull.timer
-    enabled: true
-    state: started
+    validate: "bash -n %s"
+  notify: Restart crl-fetch timer
