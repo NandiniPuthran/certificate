@@ -1,47 +1,339 @@
 ---
-# roles/crl_publisher/tasks/fetch_script_setup.yml
-#
-# Deploys the CRL fetch-and-publish script plus its systemd
-# service/timer. This is the piece that keeps the Apache-served
-# CRL fresh by re-pulling from FreeIPA on a schedule.
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# RELAY SIDE â€” server1
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+- name: Relay configuration
+  when: crl_push_mode == 'relay'
+  block:
 
-- name: Deploy CRL fetch-and-publish script
-  ansible.builtin.template:
-    src: fetch_and_publish_crl.sh.j2
-    dest: "{{ crl_publisher_script_path }}"
-    mode: "0750"
-    owner: root
-    group: root
+    - name: Assert relay inputs
+      ansible.builtin.assert:
+        that:
+          - crl_push_targets | length > 0
+          - crl_push_parallel | int > 0
+          - crl_push_ssh_timeout | int > 0
+        fail_msg: >-
+          No push targets resolved from inventory group
+          '{{ crl_push_target_group }}'. Ansible needs facts for those hosts to
+          build the list â€” gather facts against the fleet first, or set
+          crl_push_targets explicitly.
+        quiet: true
 
-- name: Create log file with correct permissions
-  ansible.builtin.file:
-    path: "{{ crl_publisher_log_path }}"
-    state: touch
-    mode: "0644"
-    owner: root
-    group: root
-    access_time: preserve
-    modification_time: preserve
+    - name: Report the worst-case run length
+      ansible.builtin.debug:
+        msg: >-
+          {{ crl_push_targets | length }} targets at {{ crl_push_parallel }}
+          parallel with a {{ crl_push_ssh_timeout }}s timeout â€” worst case
+          {{ ((crl_push_targets | length / crl_push_parallel) | round(0, 'ceil') | int
+              * crl_push_ssh_timeout / 60) | round(1) }} minutes per run.
+          Keep this below crl_push_interval or retries get skipped.
 
-- name: Deploy systemd service unit
-  ansible.builtin.template:
-    src: crl-fetch.service.j2
-    dest: /etc/systemd/system/crl-fetch.service
-    mode: "0644"
-  notify: reload systemd
+    - name: Install required packages
+      ansible.builtin.package:
+        name:
+          - openssh-client
+          - openssl
+          - util-linux            # flock
+        state: present
 
-- name: Deploy systemd timer unit
-  ansible.builtin.template:
-    src: crl-fetch.timer.j2
-    dest: /etc/systemd/system/crl-fetch.timer
-    mode: "0644"
-  notify: reload systemd
+    - name: Check the published CRL exists
+      ansible.builtin.stat:
+        path: "{{ crl_push_source_dir }}/{{ crl_push_filename }}"
+      register: _crl_push_source
 
-- name: Flush handlers so systemd picks up new units before enabling
-  ansible.builtin.meta: flush_handlers
+    - name: Note when there is nothing to push yet
+      ansible.builtin.debug:
+        msg: >-
+          {{ crl_push_source_dir }}/{{ crl_push_filename }} does not exist yet.
+          Expected if crl_fetch has not run â€” the push script exits cleanly
+          until it appears.
+      when: not _crl_push_source.stat.exists
 
-- name: Enable and start the CRL fetch timer
-  ansible.builtin.systemd:
-    name: crl-fetch.timer
-    enabled: true
-    state: started
+    # â”€â”€ Identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Guarded rather than left to idempotency: ansible.builtin.user with a
+    # different `home:` rewrites an existing user's home directory, which would
+    # move crlfetch's home out from under crl_fetch.
+    - name: Create the push group
+      ansible.builtin.group:
+        name: "{{ crl_push_user }}"
+        system: true
+        state: present
+      when: crl_push_create_user | bool
+
+    - name: Create the push user
+      ansible.builtin.user:
+        name: "{{ crl_push_user }}"
+        group: "{{ crl_push_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ crl_push_home }}"
+        create_home: true
+        state: present
+      when: crl_push_create_user | bool
+
+    - name: Confirm a shared user already exists
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ crl_push_user }}"
+      when: not (crl_push_create_user | bool)
+
+    - name: Resolve the shared user's primary group
+      ansible.builtin.command:
+        cmd: "id -gn {{ crl_push_user }}"
+      register: _crl_push_group_lookup
+      changed_when: false
+      when: not (crl_push_create_user | bool)
+
+    - name: Use the shared user's real group for ownership
+      ansible.builtin.set_fact:
+        crl_push_group: "{{ _crl_push_group_lookup.stdout | trim }}"
+      when: not (crl_push_create_user | bool)
+
+    # â”€â”€ Directories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    - name: Create push directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ crl_push_user }}"
+        group: "{{ crl_push_group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ crl_push_home }}",      mode: "0750" }
+        - { path: "{{ crl_push_state_dir }}", mode: "0750" }
+        - { path: "{{ crl_push_log_dir }}",   mode: "0750" }
+        - { path: "{{ crl_push_home }}/.ssh", mode: "0700" }
+
+    # â”€â”€ Key â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # regenerate: never â€” a re-run must not silently rotate the key and lock
+    # the relay out of every host in the fleet.
+    - name: Generate the relay SSH keypair
+      community.crypto.openssh_keypair:
+        path: "{{ crl_push_key }}"
+        type: ed25519
+        owner: "{{ crl_push_user }}"
+        group: "{{ crl_push_group }}"
+        mode: "0600"
+        comment: "crl-push@{{ inventory_hostname }}"
+        regenerate: never
+      register: _crl_push_keypair
+
+    - name: Export the public key for the receiver play
+      ansible.builtin.set_fact:
+        crl_push_relay_public_key: "{{ _crl_push_keypair.public_key }}"
+        cacheable: true
+
+    - name: Render the target list
+      ansible.builtin.copy:
+        content: |
+          # {{ ansible_managed }}
+          # Rendered from inventory group '{{ crl_push_target_group }}'.
+          {{ crl_push_targets | join('\n') }}
+        dest: "{{ crl_push_state_dir }}/targets"
+        owner: "{{ crl_push_user }}"
+        group: "{{ crl_push_group }}"
+        mode: "0640"
+
+    # StrictHostKeyChecking stays on, so known_hosts must be seeded. This is
+    # trust-on-first-use â€” prefer a known-good key source in a segmented network.
+    - name: Seed known_hosts for every target
+      ansible.builtin.known_hosts:
+        path: "{{ crl_push_known_hosts }}"
+        name: "{{ item }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -t ed25519 ' ~ item) }}"
+        state: present
+      loop: "{{ crl_push_targets }}"
+      failed_when: false
+      register: _crl_push_kh
+
+    - name: Fix known_hosts ownership
+      ansible.builtin.file:
+        path: "{{ crl_push_known_hosts }}"
+        owner: "{{ crl_push_user }}"
+        group: "{{ crl_push_group }}"
+        mode: "0600"
+        state: file
+
+    - name: Report targets whose host key could not be scanned
+      ansible.builtin.debug:
+        msg: >-
+          Host key scan failed for {{ item.item }} â€” pushes to it will be
+          refused until its key is in known_hosts.
+      loop: "{{ _crl_push_kh.results | default([]) }}"
+      when: item.failed | default(false)
+      loop_control:
+        label: "{{ item.item | default('unknown') }}"
+
+    # â”€â”€ Script, units, timer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    - name: Deploy the push script
+      ansible.builtin.template:
+        src: crl-push.sh.j2
+        dest: /usr/local/sbin/crl-push
+        owner: root
+        group: "{{ crl_push_group }}"
+        mode: "0750"
+        validate: "bash -n %s"
+      notify: Restart crl-push timer
+
+    - name: Deploy the systemd units
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - crl-push.service
+        - crl-push.timer
+      notify:
+        - Reload systemd
+        - Restart crl-push timer
+
+    - name: Install log rotation
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/crl-push
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {{ crl_push_log_dir }}/*.log {
+              weekly
+              rotate 8
+              compress
+              missingok
+              notifempty
+              create 0640 {{ crl_push_user }} {{ crl_push_group }}
+          }
+
+    - name: Flush handlers so units are loaded before enabling
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start the push timer
+      ansible.builtin.systemd:
+        name: crl-push.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# RECEIVER SIDE â€” every fleet host
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+- name: Receiver configuration
+  when: crl_push_mode == 'receiver'
+  block:
+
+    - name: Create the receive group
+      ansible.builtin.group:
+        name: "{{ crl_push_recv_user }}"
+        system: true
+        state: present
+
+    # A real shell is required for sshd to execute the forced command. The key
+    # options in authorized_keys are what prevent interactive use.
+    - name: Create the receive user
+      ansible.builtin.user:
+        name: "{{ crl_push_recv_user }}"
+        group: "{{ crl_push_recv_user }}"
+        system: true
+        shell: /bin/bash
+        home: "/home/{{ crl_push_recv_user }}"
+        create_home: true
+        state: present
+
+    - name: Create the CRL directory
+      ansible.builtin.file:
+        path: "{{ crl_push_recv_dir }}"
+        state: directory
+        owner: "{{ crl_push_recv_user }}"
+        group: root
+        mode: "0755"
+
+    - name: Create the receive state directory
+      ansible.builtin.file:
+        path: "{{ crl_push_recv_state_dir }}"
+        state: directory
+        owner: "{{ crl_push_recv_user }}"
+        group: "{{ crl_push_recv_user }}"
+        mode: "0750"
+
+    - name: Ensure openssl is present
+      ansible.builtin.package:
+        name: openssl
+        state: present
+
+    - name: Check the CA certificate is present for receiver verification
+      ansible.builtin.stat:
+        path: "{{ crl_push_recv_ca_cert }}"
+      register: _crl_recv_ca
+      when: crl_push_recv_verify | bool
+
+    - name: Fail if verification is on but the CA certificate is missing
+      ansible.builtin.fail:
+        msg: >-
+          crl_push_recv_verify is true but {{ crl_push_recv_ca_cert }} does not
+          exist here. Distribute the CA certificate first, or set
+          crl_push_recv_verify: false â€” accepting that this host then trusts
+          whatever the WAN-facing relay sends.
+      when:
+        - crl_push_recv_verify | bool
+        - not (_crl_recv_ca.stat.exists | default(false))
+
+    - name: Assert the relay public key was supplied
+      ansible.builtin.assert:
+        that:
+          - crl_push_relay_public_key | length > 0
+        fail_msg: >-
+          crl_push_relay_public_key is empty. Run the relay play first â€” it
+          exports the key as a fact â€” or pin the key in group_vars.
+        quiet: true
+
+    # The forced command is the security control. Even holding this private
+    # key, an attacker gets stdin to one script: no shell, no pty, no
+    # forwarding, and no ability to name a destination path.
+    - name: Install the relay key as a forced command
+      ansible.posix.authorized_key:
+        user: "{{ crl_push_recv_user }}"
+        key: "{{ crl_push_relay_public_key }}"
+        state: present
+        exclusive: true
+        key_options: >-
+          command="/usr/local/sbin/crl-receive",
+          no-agent-forwarding,no-port-forwarding,no-pty,no-user-rc,no-X11-forwarding
+
+    - name: Deploy the receive script
+      ansible.builtin.template:
+        src: crl-receive.sh.j2
+        dest: /usr/local/sbin/crl-receive
+        owner: root
+        group: "{{ crl_push_recv_user }}"
+        mode: "0750"
+        validate: "bash -n %s"
+
+    # Scoped to exactly "systemctl reload <named service>". No wildcards, no
+    # ALL â€” a remote push must not escalate beyond a reload.
+    - name: Grant scoped sudo for service reloads
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/crl-receive
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+        content: |
+          # {{ ansible_managed }}
+          {{ crl_push_recv_user }} ALL=(root) NOPASSWD: {% for s in crl_push_recv_reload_services %}/bin/systemctl reload {{ s }}{{ ", " if not loop.last else "" }}{% endfor %}
+
+          Defaults:{{ crl_push_recv_user }} !requiretty
+      when: crl_push_recv_reload_services | length > 0
+
+    - name: Remove the sudoers file when no services need reloading
+      ansible.builtin.file:
+        path: /etc/sudoers.d/crl-receive
+        state: absent
+      when: crl_push_recv_reload_services | length == 0
+
+    - name: Warn when no reload services are configured
+      ansible.builtin.debug:
+        msg: >-
+          crl_push_recv_reload_services is empty. The CRL will be installed to
+          {{ crl_push_recv_dir }} but nothing is told about it, so distribution
+          has no practical effect on this host.
+      when: crl_push_recv_reload_services | length == 0
