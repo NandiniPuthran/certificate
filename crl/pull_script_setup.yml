@@ -1,3 +1,73 @@
+
+---
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# crl_fetch â€” pull the CRL from the FreeIPA CA, validate it, publish it.
+#
+# This role does ONE thing: it keeps a known-good CRL on local disk.
+# It does not distribute it and it does not serve it over HTTP â€” those are
+# crl_push and apache_crl. The only link to them is the on-change hook at
+# the bottom of this file, which stays empty until crl_push exists.
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+# â”€â”€ Source â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Fetch from the CA's OWN hostname, never from ipa-ca.example.com. That name
+# will later be overridden in site B DNS to point at this host, so using it
+# here would make the relay eventually fetch from itself.
+crl_fetch_ipa_server_fqdn: ipa1.sitea.example.com
+crl_fetch_source_url: "http://{{ crl_fetch_ipa_server_fqdn }}/ipa/crl/MasterCRL.bin"
+crl_fetch_timeout: 60
+
+# â”€â”€ Trust anchor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# The transport is plain HTTP, so this certificate is the ONLY thing that
+# makes the fetched bytes trustworthy. Not optional.
+crl_fetch_ca_cert: /etc/ssl/certs/ipa-ca.crt
+
+# â”€â”€ Output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+crl_fetch_filename: MasterCRL.bin
+crl_fetch_pem_filename: MasterCRL.pem
+crl_fetch_publish_pem: true          # most Linux apps want PEM, not DER
+
+# Where the validated CRL lands. apache_crl will later serve this directory;
+# crl_push will later read from it. Neither is required for this role to work.
+crl_fetch_publish_dir: /var/www/crl
+crl_fetch_publish_mode: "0644"
+
+# â”€â”€ Working directories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+crl_fetch_home: /var/lib/crl-fetch
+crl_fetch_staging_dir: /var/lib/crl-fetch/staging
+crl_fetch_state_dir: /var/lib/crl-fetch/state
+crl_fetch_log_dir: /var/log/crl-fetch
+
+# â”€â”€ Identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+crl_fetch_user: crlfetch
+crl_fetch_group: crlfetch
+
+# â”€â”€ Schedule â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Every 3 hours. The CA regenerates every 4h, so worst-case propagation from
+# revocation to this host is roughly 7h â€” well inside a 1-year nextUpdate.
+crl_fetch_interval: "*-*-* 00/3:00:00"
+crl_fetch_randomized_delay: 300      # seconds, avoids a thundering herd
+
+# â”€â”€ On-change hook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Runs ONLY when the CRL Number actually advances, never on an unchanged
+# fetch. Leave empty for now; set to /usr/local/sbin/crl-push once that role
+# exists. A failing hook is logged but never fails the fetch â€” publishing a
+# good CRL locally must not depend on downstream distribution working.
+crl_fetch_on_change_hook: ""
+
+# â”€â”€ Staleness reporting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Not a separate script. When a fetch fails, crl-fetch reports how long it has
+# been since one last succeeded, and escalates to a critical log line past this
+# threshold. With nextUpdate at a year nothing downstream will ever error, so
+# this line is the only signal that revocation data has stopped updating.
+# Watch for it, or watch `systemctl --failed` for crl-fetch.service.
+crl_fetch_warn_after_seconds: 86400     # 24h with no successful fetch
+
+# â”€â”€ Deploy behaviour â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Runs one fetch synchronously at the end of the play and fails if nothing
+# lands. Set false for --check runs or when the WAN is known to be down.
+crl_fetch_run_on_deploy: true
+
 #!/bin/bash
 # {{ ansible_managed }}
 #
