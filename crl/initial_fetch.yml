@@ -1,17 +1,519 @@
 ---
-# roles/crl_publisher/tasks/initial_fetch.yml
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# crl_push â€” distribute the published CRL from the relay to the fleet.
 #
-# Runs the fetch script once immediately after deployment, so the
-# CRL is populated right away rather than waiting up to the full
-# timer interval for the first run.
+# One role, two sides, selected per play with crl_push_mode:
+#   relay    â€” server1: holds the SSH key, pushes on a timer, tracks failures
+#   receiver â€” fleet:   forced-command entry point, validates and installs
+#
+# Independent of crl_fetch by design. It reads the published file and compares
+# checksums itself, so crl_fetch_on_change_hook stays EMPTY and nothing in
+# crl_fetch needs to change.
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-- name: Run initial CRL fetch
-  ansible.builtin.command:
-    cmd: "{{ crl_publisher_script_path }}"
-  register: crl_publisher_initial_fetch
-  changed_when: "'CRL published successfully' in crl_publisher_initial_fetch.stdout"
-  failed_when: crl_publisher_initial_fetch.rc != 0
+crl_push_mode: relay                   # relay | receiver
 
-- name: Show initial fetch result
-  ansible.builtin.debug:
-    msg: "{{ crl_publisher_initial_fetch.stdout_lines }}"
+# â”€â”€ The file being distributed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Must match crl_fetch_publish_dir / crl_fetch_filename on the relay.
+crl_push_source_dir: /var/www/crl
+crl_push_filename: MasterCRL.bin
+
+# â”€â”€ Relay identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Sharing the account with crl_fetch is supported. In group_vars:
+#   crl_push_user: crlfetch
+#   crl_push_create_user: false
+# and set crl_fetch_inaccessible_paths so the fetch service cannot read the SSH
+# key. systemd namespacing is per-unit, not per-user, so isolation survives.
+#
+# crl_push_create_user must be false for an existing user: ansible.builtin.user
+# with a different `home:` REWRITES the existing home directory rather than
+# skipping. The group is resolved at runtime in that case.
+crl_push_user: crlpush
+crl_push_create_user: true
+crl_push_group: "{{ crl_push_user }}"  # overridden at runtime when sharing
+
+crl_push_home: /var/lib/crl-push
+crl_push_state_dir: /var/lib/crl-push/state
+crl_push_log_dir: /var/log/crl-push
+crl_push_key: /var/lib/crl-push/.ssh/id_ed25519
+crl_push_known_hosts: /var/lib/crl-push/.ssh/known_hosts
+
+# â”€â”€ Targets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+crl_push_target_group: certificate
+crl_push_targets: >-
+  {{ groups[crl_push_target_group] | default([])
+     | map('extract', hostvars, 'ansible_fqdn')
+     | select('string') | list }}
+
+# â”€â”€ Transport â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Worst-case run length: ceil(targets / parallel) * ssh_timeout.
+# 500 hosts at 10 parallel and 30s = ~25 min. Keep crl_push_interval above it,
+# or retries get skipped by the flock.
+crl_push_parallel: 10
+crl_push_ssh_timeout: 30
+
+# â”€â”€ Schedule â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Shorter than crl_fetch on purpose. Most runs find an unchanged CRL and no
+# pending hosts and exit in milliseconds. The interval exists to retry hosts
+# that were unreachable, not to look for new CRLs.
+crl_push_interval: "*:0/30"
+crl_push_randomized_delay: 120
+
+# â”€â”€ Receiver identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Always separate â€” different host, nothing to share with.
+crl_push_recv_user: crlrecv
+
+# â”€â”€ Receiver validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Leave true. The relay is WAN-facing; verifying the CA signature here makes it
+# a transport rather than an authority, so a compromised relay cannot push a
+# forged EMPTY CRL â€” which revokes nothing â€” to the whole fleet. The lastUpdate
+# comparison additionally stops it replaying an older genuine CRL.
+crl_push_recv_verify: true
+crl_push_recv_ca_cert: /etc/ssl/certs/ipa-ca.crt
+
+# â”€â”€ Receiver install â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+crl_push_recv_dir: /etc/ssl/crl
+crl_push_recv_der: MasterCRL.bin
+crl_push_recv_pem: ipa-crl.pem
+crl_push_recv_pem_enabled: true
+crl_push_recv_state_dir: /var/lib/crl-push
+crl_push_recv_max_bytes: 33554432      # 32 MB ceiling on an inbound stream
+
+# POPULATE THIS. Empty means the CRL is installed and no service is told about
+# it, so the whole pipeline reports success while changing nothing.
+# Sudo is scoped to "systemctl reload <name>" for exactly these entries.
+crl_push_recv_reload_services: []
+#  - apache2
+#  - haproxy
+
+# â”€â”€ Relay public key (receiver side) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Set by the relay play via set_fact, or pinned in group_vars for split runs.
+crl_push_relay_public_key: ""
+
+# â”€â”€ Deploy behaviour â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+crl_push_run_on_deploy: true           # relay: run one push at the end
+
+---
+- name: Assert a valid mode was selected
+  ansible.builtin.assert:
+    that:
+      - crl_push_mode in ['relay', 'receiver']
+    fail_msg: "crl_push_mode must be 'relay' or 'receiver', got '{{ crl_push_mode }}'"
+    quiet: true
+  tags: [crl_push, always]
+
+- name: Configure
+  ansible.builtin.import_tasks: configure.yml
+  tags: [crl_push, configure]
+
+- name: Verify
+  ansible.builtin.import_tasks: verify.yml
+  tags: [crl_push, verify]
+
+  ---
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# RELAY â€” prove the path end to end rather than waiting for the timer
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+- name: Relay verification
+  when:
+    - crl_push_mode == 'relay'
+    - crl_push_run_on_deploy | bool
+  block:
+
+    - name: Run one push synchronously
+      ansible.builtin.command:
+        cmd: /usr/local/sbin/crl-push
+      become: true
+      become_user: "{{ crl_push_user }}"
+      register: _crl_push_run
+      changed_when: "'push complete' in _crl_push_run.stderr"
+      # Partial failure across a large fleet is normal and is recorded in
+      # push-pending for automatic retry â€” it must not fail the play.
+      failed_when: false
+
+    - name: Read the pending list
+      ansible.builtin.slurp:
+        src: "{{ crl_push_state_dir }}/push-pending"
+      register: _crl_push_pending
+      failed_when: false
+
+    - name: Report the push result
+      ansible.builtin.debug:
+        msg: "{{ _crl_push_run.stderr_lines | default(['no output']) }}"
+
+    - name: Report hosts still pending
+      ansible.builtin.debug:
+        msg: >-
+          Still pending: {{ _crl_push_pend_list | join(', ') }}.
+          These are retried automatically on the next timer run â€” no action
+          needed unless they persist across several intervals.
+      vars:
+        _crl_push_pend_list: >-
+          {{ (_crl_push_pending.content | default('') | b64decode).split('\n')
+             | reject('equalto', '') | list }}
+      when: _crl_push_pend_list | length > 0
+
+    - name: Show the timer schedule
+      ansible.builtin.command:
+        cmd: systemctl list-timers crl-push.timer --no-pager
+      register: _crl_push_timers
+      changed_when: false
+
+    - name: Report the timer schedule
+      ansible.builtin.debug:
+        msg: "{{ _crl_push_timers.stdout_lines }}"
+
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# RECEIVER â€” confirm the forced command is actually restricting the key
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+- name: Receiver verification
+  when: crl_push_mode == 'receiver'
+  block:
+
+    - name: Read back the authorized_keys entry
+      ansible.builtin.slurp:
+        src: "/home/{{ crl_push_recv_user }}/.ssh/authorized_keys"
+      register: _crl_recv_ak
+
+    # If this assert ever fails, the relay key has shell access to this host.
+    # That is the single worst outcome in this design, so it is checked here
+    # rather than left to a manual test someone might skip.
+    - name: Assert the key is bound to the forced command with no shell access
+      ansible.builtin.assert:
+        that:
+          - '''command="/usr/local/sbin/crl-receive"'' in _crl_recv_ak_text'
+          - "'no-pty' in _crl_recv_ak_text"
+          - "'no-port-forwarding' in _crl_recv_ak_text"
+          - "'no-agent-forwarding' in _crl_recv_ak_text"
+        fail_msg: >-
+          The relay key in authorized_keys is NOT restricted to the forced
+          command. As it stands that key has interactive shell access to this
+          host. Do not proceed â€” re-run the configure phase and check
+          ansible.posix.authorized_key key_options.
+        success_msg: "Forced command and restrictions confirmed."
+        quiet: true
+      vars:
+        _crl_recv_ak_text: "{{ _crl_recv_ak.content | b64decode }}"
+
+    - name: Confirm the receive script is present and executable
+      ansible.builtin.stat:
+        path: /usr/local/sbin/crl-receive
+      register: _crl_recv_script
+
+    - name: Fail if the receive script is missing
+      ansible.builtin.fail:
+        msg: >-
+          /usr/local/sbin/crl-receive is missing or not executable. The forced
+          command would fail on every push.
+      when: not (_crl_recv_script.stat.exists and _crl_recv_script.stat.xusr)
+
+    - name: Report the installed CRL, if any
+      ansible.builtin.command:
+        cmd: >-
+          openssl crl -inform DER
+          -in {{ crl_push_recv_dir }}/{{ crl_push_recv_der }}
+          -noout -lastupdate -nextupdate
+      register: _crl_recv_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Show the installed CRL state
+      ansible.builtin.debug:
+        msg: >-
+          {{ _crl_recv_installed.stdout_lines
+             | default(['No CRL installed yet â€” expected before the first push.']) }}
+
+
+             ---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart crl-push timer
+  ansible.builtin.systemd:
+    name: crl-push.timer
+    state: restarted
+    enabled: true
+  when:
+    - not ansible_check_mode
+    - crl_push_mode == 'relay'
+
+    #!/bin/bash
+# {{ ansible_managed }}
+#
+# Distribute the published CRL to the fleet.
+#
+# â”€â”€ Why this is separate from crl-fetch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# crl-fetch exits early when the CRL checksum is unchanged, which is most runs.
+# If the push hung off that, a host unreachable during one push would wait for
+# the next CA regeneration â€” up to 7 hours â€” for another chance. Across 500
+# devices some are always rebooting or patching, so partial failure is the
+# normal case. This script decides for itself what needs sending, so a failed
+# host is retried on the next interval.
+#
+# crl-fetch also parses attacker-controllable bytes off an unauthenticated HTTP
+# connection, while this script holds a key that reaches every host in the
+# fleet. Even when they share a service account, crl-fetch.service uses
+# InaccessiblePaths= to hide this key from that process.
+#
+# â”€â”€ Cost of a run with nothing to do â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Two checksum reads and a file test. Milliseconds. That is the normal case.
+
+set -uo pipefail
+
+SOURCE="{{ crl_push_source_dir }}/{{ crl_push_filename }}"
+STATE="{{ crl_push_state_dir }}"
+LOG_DIR="{{ crl_push_log_dir }}"
+KEY="{{ crl_push_key }}"
+KNOWN_HOSTS="{{ crl_push_known_hosts }}"
+RECV_USER="{{ crl_push_recv_user }}"
+TARGETS_FILE="${STATE}/targets"
+PENDING="${STATE}/push-pending"
+INFLIGHT="${STATE}/in-flight-sum"
+LOCKFILE="${STATE}/push.lock"
+PARALLEL="{{ crl_push_parallel }}"
+SSH_TIMEOUT="{{ crl_push_ssh_timeout }}"
+
+log() { logger -t crl-push -p "daemon.$1" -- "$2"; printf '%s [%s] %s\n' "$(date -Is)" "$1" "$2" >&2; }
+
+# A push across a large fleet can outlive its interval. Never let two overlap.
+exec 9>"$LOCKFILE"
+flock -n 9 || { log warning "a push is already running; skipping this interval"; exit 0; }
+
+[ -f "$SOURCE" ]       || { log info "no published CRL at ${SOURCE} yet; nothing to do"; exit 0; }
+[ -f "$TARGETS_FILE" ] || { log err "target list ${TARGETS_FILE} is missing"; exit 1; }
+
+CRL_SUM="$(sha256sum "$SOURCE" | cut -d' ' -f1)"
+LAST_SUM="$(cat "$INFLIGHT" 2>/dev/null || echo none)"
+
+mapfile -t ALL_TARGETS     < <(grep -vE '^\s*(#|$)' "$TARGETS_FILE")
+mapfile -t PENDING_TARGETS < <(grep -vE '^\s*(#|$)' "$PENDING" 2>/dev/null || true)
+
+# â”€â”€ Decide what needs sending â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# A new CRL goes to everyone. An unchanged CRL goes only to hosts that
+# previously failed. Neither condition means the run is a no-op.
+if [ "$CRL_SUM" != "$LAST_SUM" ]; then
+    TARGETS=("${ALL_TARGETS[@]}")
+    printf '%s\n' "$CRL_SUM" > "$INFLIGHT"
+    log notice "new CRL (${CRL_SUM:0:12}) â€” pushing to all ${#TARGETS[@]} host(s)"
+elif [ "${#PENDING_TARGETS[@]}" -gt 0 ]; then
+    TARGETS=("${PENDING_TARGETS[@]}")
+    log notice "CRL unchanged â€” retrying ${#TARGETS[@]} previously failed host(s)"
+else
+    log info "CRL unchanged and nothing pending; nothing to do"
+    date +%s > "${STATE}/last-success"
+    exit 0
+fi
+
+RESULTS="$(mktemp -d "${STATE}/results.XXXXXXXX")"
+trap 'rm -rf "$RESULTS"' EXIT
+
+# â”€â”€ Push to one host â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# The CRL is streamed on stdin. There is no remote path and no remote command:
+# the receiving key is bound to a forced command, so this cannot write an
+# arbitrary file even if this script were altered.
+push_one() {
+    local host="$1"
+    if ssh -i "$KEY" \
+           -o BatchMode=yes \
+           -o StrictHostKeyChecking=yes \
+           -o UserKnownHostsFile="$KNOWN_HOSTS" \
+           -o ConnectTimeout="$SSH_TIMEOUT" \
+           -o ServerAliveInterval=10 \
+           "${RECV_USER}@${host}" \
+           < "$SOURCE" >> "${LOG_DIR}/push.log" 2>&1
+    then
+        printf 'ok\n' > "${RESULTS}/${host}"
+    else
+        printf 'fail\n' > "${RESULTS}/${host}"
+    fi
+}
+
+# Bounded parallelism: serial across 500 hosts would exceed the interval,
+# unbounded would open 500 SSH connections at once.
+running=0
+for host in "${TARGETS[@]}"; do
+    push_one "$host" &
+    running=$(( running + 1 ))
+    if [ "$running" -ge "$PARALLEL" ]; then
+        wait -n
+        running=$(( running - 1 ))
+    fi
+done
+wait
+
+# â”€â”€ Tally and record failures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+OK_COUNT=0
+FAIL_COUNT=0
+: > "${PENDING}.new"
+
+for host in "${TARGETS[@]}"; do
+    if [ "$(cat "${RESULTS}/${host}" 2>/dev/null)" = "ok" ]; then
+        OK_COUNT=$(( OK_COUNT + 1 ))
+    else
+        FAIL_COUNT=$(( FAIL_COUNT + 1 ))
+        printf '%s\n' "$host" >> "${PENDING}.new"
+    fi
+done
+
+# On a retry run only a subset was attempted, so hosts that were pending but
+# not tried this time must stay pending. On a full run every host was
+# attempted, so the new list is already complete.
+if [ "$CRL_SUM" = "$LAST_SUM" ]; then
+    for host in "${PENDING_TARGETS[@]}"; do
+        printf '%s\n' "${TARGETS[@]}" | grep -qxF "$host" || printf '%s\n' "$host" >> "${PENDING}.new"
+    done
+fi
+
+sort -u "${PENDING}.new" > "$PENDING"
+rm -f "${PENDING}.new"
+date +%s > "${STATE}/last-success"
+
+if [ "$FAIL_COUNT" -eq 0 ]; then
+    log notice "push complete: ${OK_COUNT} succeeded, 0 failed"
+    exit 0
+fi
+
+# Non-zero marks crl-push.service failed, which is the monitoring signal.
+# push-pending names exactly which hosts, and they are retried next run.
+log err "push complete with failures: ${OK_COUNT} succeeded, ${FAIL_COUNT} failed â€” see ${PENDING}"
+exit 1
+
+
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Forced command for the relay's SSH key. Reads a DER CRL on stdin, checks it,
+# installs it atomically, reloads whatever holds it open.
+#
+# This is the ONLY thing the relay's key can do here. It cannot open a shell,
+# forward a port, or name a destination path.
+#
+{% if crl_push_recv_verify %}
+# â”€â”€ Why this re-verifies instead of trusting the relay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# The relay is WAN-facing. Checking the CA signature here makes it a transport
+# rather than an authority: a compromised relay cannot push a forged EMPTY CRL
+# â€” which revokes nothing â€” to the whole fleet. The lastUpdate comparison
+# additionally stops it replaying an older genuine CRL.
+{% else %}
+# â”€â”€ WARNING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# crl_push_recv_verify is false, so this host installs whatever the relay sends
+# without checking the CA signature. A compromised relay could push a forged
+# empty CRL fleet-wide and nothing here would notice.
+{% endif %}
+
+set -euo pipefail
+
+RECV_DIR="{{ crl_push_recv_dir }}"
+CRL_DER="{{ crl_push_recv_der }}"
+CRL_PEM="{{ crl_push_recv_pem }}"
+STATE="{{ crl_push_recv_state_dir }}"
+CA_CERT="{{ crl_push_recv_ca_cert }}"
+MAX_BYTES="{{ crl_push_recv_max_bytes }}"
+
+log() { logger -t crl-receive -p "daemon.$1" -- "$2"; }
+die() { log err "$1"; printf 'ERROR: %s\n' "$1" >&2; exit 1; }
+
+WORKDIR="$(mktemp -d "${STATE}/recv.XXXXXXXX")"
+trap 'rm -rf "$WORKDIR"' EXIT
+INCOMING="${WORKDIR}/${CRL_DER}"
+
+# Bounded read: a hostile or looping sender must not be able to fill the disk.
+head -c "$MAX_BYTES" > "$INCOMING"
+[ -s "$INCOMING" ] || die "received zero bytes"
+
+{% if crl_push_recv_verify %}
+openssl crl -inform DER -in "$INCOMING" -CAfile "$CA_CERT" -noout 2>&1 \
+    | grep -q 'verify OK' \
+    || die "CA signature did not verify against ${CA_CERT} â€” refusing to install"
+{% else %}
+openssl crl -inform DER -in "$INCOMING" -noout >/dev/null 2>&1 \
+    || die "received payload is not a parseable DER CRL"
+{% endif %}
+
+# lastUpdate, not nextUpdate â€” nextUpdate is derived from the CA's grace period,
+# so changing nextUpdateGracePeriod would shift the ordering underneath this.
+NEW_RAW="$(openssl crl -inform DER -in "$INCOMING" -noout -lastupdate 2>/dev/null | cut -d= -f2-)"
+NEW_TS="$(date -d "$NEW_RAW" +%s 2>/dev/null)" || die "could not read lastUpdate"
+
+if [ -f "${RECV_DIR}/${CRL_DER}" ]; then
+    CUR_RAW="$(openssl crl -inform DER -in "${RECV_DIR}/${CRL_DER}" -noout -lastupdate 2>/dev/null | cut -d= -f2-)"
+    CUR_TS="$(date -d "$CUR_RAW" +%s 2>/dev/null || echo 0)"
+
+    if [ "$NEW_TS" -lt "$CUR_TS" ]; then
+        die "REJECTED â€” received CRL (${NEW_RAW}) is older than the installed one (${CUR_RAW})"
+    fi
+    if [ "$NEW_TS" -eq "$CUR_TS" ]; then
+        log info "CRL ${NEW_RAW} already installed; no reload"
+        date +%s > "${STATE}/last-received"
+        printf 'UNCHANGED\n'
+        exit 0
+    fi
+fi
+
+# Atomic install â€” write beside the target, then rename, so a service reading
+# the file never sees a partial write.
+install -m 0644 "$INCOMING" "${RECV_DIR}/.${CRL_DER}.incoming"
+mv -f "${RECV_DIR}/.${CRL_DER}.incoming" "${RECV_DIR}/${CRL_DER}"
+
+{% if crl_push_recv_pem_enabled %}
+openssl crl -inform DER -in "$INCOMING" -outform PEM -out "${WORKDIR}/${CRL_PEM}"
+install -m 0644 "${WORKDIR}/${CRL_PEM}" "${RECV_DIR}/.${CRL_PEM}.incoming"
+mv -f "${RECV_DIR}/.${CRL_PEM}.incoming" "${RECV_DIR}/${CRL_PEM}"
+{% endif %}
+
+date +%s > "${STATE}/last-received"
+log notice "installed CRL generated ${NEW_RAW}"
+
+{% for svc in crl_push_recv_reload_services %}
+if sudo -n /bin/systemctl reload {{ svc }} >/dev/null 2>&1; then
+    log info "reloaded {{ svc }}"
+else
+    log err "reload of {{ svc }} FAILED â€” it may still be using the previous CRL"
+fi
+{% endfor %}
+{% if crl_push_recv_reload_services | length == 0 %}
+# crl_push_recv_reload_services is empty: the CRL is installed but nothing is
+# told about it. Populate that list or distribution changes nothing in practice.
+{% endif %}
+
+printf 'OK %s\n' "$NEW_RAW"
+exit 0
+
+# {{ ansible_managed }}
+#
+# WHAT to run. No schedule here â€” crl-push.timer triggers it.
+# No [Install] section: this must only be started by its timer or by hand.
+
+[Unit]
+Description=Distribute the published CRL to the fleet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ crl_push_user }}
+Group={{ crl_push_group }}
+ExecStart=/usr/local/sbin/crl-push
+
+# Worst case is ceil(targets / parallel) * ssh_timeout, plus headroom so a
+# slow-but-progressing push is not killed part way through the fleet.
+TimeoutStartSec={{ (((crl_push_targets | length / crl_push_parallel) | round(0, 'ceil') | int * (crl_push_ssh_timeout | int)) + 600) }}
+
+# This service holds a key that reaches every host in the fleet.
+# ProtectSystem=strict makes the filesystem read-only, so any path missing from
+# ReadWritePaths fails at runtime rather than at deploy time.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths={{ crl_push_state_dir }} {{ crl_push_log_dir }}
+
+
+
