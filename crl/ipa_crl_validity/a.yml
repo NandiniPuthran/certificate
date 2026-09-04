@@ -50,3 +50,8 @@
     path: "{{ freeradius_ca_path }}/{{ crl_hash.stdout | trim }}.r0"
   register: crl_link_final
   failed_when: not crl_link_final.stat.exists
+
+
+  docker exec <container> pki-server ca-config-set ca.crl.MasterCRL.enableDailyUpdates false
+docker exec <container> pki-server ca-config-set ca.crl.MasterCRL.nextUpdateGracePeriod 525600
+docker exec <container> pki-server ca-config-show ca.crl.MasterCRL.nextUpdateGracePeriod
