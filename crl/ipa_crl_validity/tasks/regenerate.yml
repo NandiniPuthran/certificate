@@ -1,0 +1,49 @@
+---
+- name: Capture CRL state before regeneration
+  ansible.builtin.include_tasks: read_crl.yml
+  vars:
+    ipa_crl_state_var: ipa_crl_before
+
+# There is no `ipa` command for this. FreeIPA itself calls the Dogtag agent
+# servlet on 8443 with the RA agent identity; this is the same call.
+- name: Request a fresh CRL from the CA agent interface
+  ansible.builtin.uri:
+    url: >-
+      https://{{ ansible_fqdn }}:{{ ipa_crl_agent_port }}/ca/agent/ca/updateCRL
+    method: POST
+    client_cert: "{{ ipa_crl_ra_cert }}"
+    client_key: "{{ ipa_crl_ra_key }}"
+    ca_path: "{{ ipa_crl_ca_bundle }}"
+    body_format: form-urlencoded
+    body:
+      crlIssuingPoint: "{{ ipa_crl_issuing_point }}"
+      waitForUpdate: "true"
+      clearCRLCache: "{{ ipa_crl_clear_cache | bool | string | lower }}"
+      xml: "true"
+    return_content: true
+    timeout: "{{ ipa_crl_update_timeout }}"
+  register: ipa_crl_update
+  changed_when: false
+  check_mode: false
+
+- name: Capture CRL state after regeneration
+  ansible.builtin.include_tasks: read_crl.yml
+  vars:
+    ipa_crl_state_var: ipa_crl_after
+
+# The servlet returns 200 in cases where nothing was actually signed, so the
+# CRL number is the only trustworthy evidence.
+- name: Assert the CRL number advanced
+  ansible.builtin.assert:
+    that:
+      - ipa_crl_after.crl_number != ipa_crl_before.crl_number
+      - ipa_crl_after.this_update | int >= ipa_crl_before.this_update | int
+    fail_msg: >-
+      updateCRL returned {{ ipa_crl_update.status }} but the published CRL is
+      still number {{ ipa_crl_before.crl_number }}. Check
+      /var/log/pki/pki-tomcat/ca/debug.* and confirm the RA agent has agent
+      privileges.
+    success_msg: >-
+      CRL advanced {{ ipa_crl_before.crl_number }} ->
+      {{ ipa_crl_after.crl_number }}.
+    quiet: true

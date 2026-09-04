@@ -1,0 +1,51 @@
+---
+- name: Read the published CRL
+  ansible.builtin.include_tasks: read_crl.yml
+  vars:
+    ipa_crl_state_var: ipa_crl_now
+
+- name: Assert the CRL has not expired
+  ansible.builtin.assert:
+    that:
+      - ipa_crl_now.next_update | int > ansible_date_time.epoch | int
+    fail_msg: >-
+      Published CRL expired at
+      {{ '%Y-%m-%d %H:%M:%S UTC' | strftime(ipa_crl_now.next_update) }}.
+      Every consumer enforcing revocation is failing closed right now.
+    quiet: true
+
+- name: Assert the validity window matches the configured model
+  ansible.builtin.assert:
+    that:
+      - (_window | int)
+        >= ((ipa_crl_expected_window_seconds | int)
+            * (ipa_crl_validate_tolerance | float)) | int
+    fail_msg: >-
+      Window is {{ ((_window | int) / 86400) | round(1) }} days,
+      expected ~{{ ((ipa_crl_expected_window_seconds | int) / 86400) | round(1) }}.
+      A window of roughly one day means enableDailyUpdates is still true or
+      CS.cfg was edited while pki-tomcatd was running and got reverted.
+    quiet: true
+  vars:
+    _window: "{{ ipa_crl_now.next_update | int - ipa_crl_now.this_update | int }}"
+
+# Once nextUpdate is a year out, "not expired" stops meaning "not stale".
+# Freshness has to be measured from thisUpdate instead.
+- name: Warn when the CRL is stale relative to its rebuild interval
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: CRL is {{ (_age / 3600) | round(1) }} h old but is rebuilt every
+      {{ ipa_crl_regen_minutes }} min. It is still inside its validity window,
+      so no consumer will complain. Check pki-tomcatd on the generation master.
+  when: _age > (ipa_crl_regen_minutes | int * 60 * 3)
+  vars:
+    _age: "{{ (ansible_date_time.epoch | int) - (ipa_crl_now.this_update | int) }}"
+
+- name: Report CRL state
+  ansible.builtin.debug:
+    msg:
+      - "CRL number : {{ ipa_crl_now.crl_number }}"
+      - "thisUpdate : {{ '%Y-%m-%d %H:%M:%S UTC' | strftime(ipa_crl_now.this_update) }}"
+      - "nextUpdate : {{ '%Y-%m-%d %H:%M:%S UTC' | strftime(ipa_crl_now.next_update) }}"
+      - "Window     : {{ ((ipa_crl_now.next_update | int - ipa_crl_now.this_update | int) / 86400) | round(1) }} days"
+      - "Age        : {{ ((ansible_date_time.epoch | int - ipa_crl_now.this_update | int) / 3600) | round(1) }} hours"

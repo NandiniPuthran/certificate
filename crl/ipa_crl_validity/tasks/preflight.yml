@@ -1,0 +1,60 @@
+---
+- name: Stat CA configuration and RA agent credentials
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ ipa_crl_cs_cfg }}"
+    - "{{ ipa_crl_ra_cert }}"
+    - "{{ ipa_crl_ra_key }}"
+    - "{{ ipa_crl_ca_bundle }}"
+  register: ipa_crl_paths
+
+- name: Fail fast when this host is not a FreeIPA CA
+  ansible.builtin.assert:
+    that:
+      - ipa_crl_paths.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} is missing
+      {{ ipa_crl_paths.results | rejectattr('stat.exists')
+         | map(attribute='item') | join(', ') }}.
+      This role targets a FreeIPA CA server.
+    quiet: true
+
+- name: Read CRL generation status
+  ansible.builtin.command: ipa-crlgen-manage status
+  register: ipa_crl_gen_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail fast when this host is not the CRL generation master
+  ansible.builtin.assert:
+    that:
+      - ipa_crl_gen_status.rc == 0
+      - "'CRL generation: enabled' in ipa_crl_gen_status.stdout"
+    fail_msg: >-
+      CRL generation is not enabled on {{ inventory_hostname }}. Only the
+      generation master builds MasterCRL; applying these settings on any
+      other replica changes nothing. Confirm the target with
+      `ipa-crlgen-manage status`.
+    quiet: true
+
+- name: Refuse a validity model that trades away revocation latency
+  ansible.builtin.assert:
+    that:
+      - ipa_crl_regen_minutes | int > 0
+      - ipa_crl_regen_minutes | int <= ipa_crl_max_regen_minutes | int
+      - ipa_crl_grace_minutes | int >= 0
+    fail_msg: >-
+      ipa_crl_regen_minutes is {{ ipa_crl_regen_minutes }} min. Revocations do
+      not reach the fleet until the next rebuild, so keep this at or below
+      {{ ipa_crl_max_regen_minutes }} min and extend ipa_crl_grace_minutes to
+      lengthen nextUpdate.
+    quiet: true
+
+- name: Report the intended validity model
+  ansible.builtin.debug:
+    msg: >-
+      Rebuild every {{ ipa_crl_regen_minutes }} min;
+      nextUpdate ~= thisUpdate +
+      {{ ((ipa_crl_expected_window_seconds | int) / 86400) | round(1) }} days.

@@ -1,0 +1,72 @@
+---
+# Drift detection first. Without this the role would bounce the CA on every
+# run, which is not acceptable on a production issuing CA.
+- name: Detect CS.cfg drift
+  ansible.builtin.lineinfile:
+    path: "{{ ipa_crl_cs_cfg }}"
+    regexp: "^{{ item.key | regex_escape }}="
+    line: "{{ item.key }}={{ item.value }}"
+  loop: "{{ ipa_crl_settings }}"
+  loop_control:
+    label: "{{ item.key }}"
+  check_mode: true
+  register: ipa_crl_drift
+
+- name: Record whether CS.cfg needs changing
+  ansible.builtin.set_fact:
+    ipa_crl_config_changed: >-
+      {{ ipa_crl_drift.results | selectattr('changed') | list | length > 0 }}
+
+- name: Report settings that will change
+  ansible.builtin.debug:
+    msg: >-
+      {{ ipa_crl_drift.results | selectattr('changed')
+         | map(attribute='item.key') | list }}
+  when: ipa_crl_config_changed | bool
+
+- name: Apply CRL configuration
+  when: ipa_crl_config_changed | bool
+  block:
+    - name: Back up CS.cfg
+      ansible.builtin.copy:
+        src: "{{ ipa_crl_cs_cfg }}"
+        dest: "{{ ipa_crl_cs_cfg }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: "{{ ipa_crl_file_owner }}"
+        group: "{{ ipa_crl_file_group }}"
+        mode: "0660"
+      when: ipa_crl_backup | bool
+
+    # pki-tomcatd serialises its in-memory config back to CS.cfg on shutdown.
+    # Editing while it runs looks like it worked and is silently reverted.
+    - name: Stop the CA before editing CS.cfg
+      ansible.builtin.systemd:
+        name: "{{ ipa_crl_service }}"
+        state: stopped
+
+    - name: Write CRL settings
+      ansible.builtin.lineinfile:
+        path: "{{ ipa_crl_cs_cfg }}"
+        regexp: "^{{ item.key | regex_escape }}="
+        line: "{{ item.key }}={{ item.value }}"
+        owner: "{{ ipa_crl_file_owner }}"
+        group: "{{ ipa_crl_file_group }}"
+        mode: "0660"
+      loop: "{{ ipa_crl_settings }}"
+      loop_control:
+        label: "{{ item.key }}"
+      notify: Force CRL regeneration
+
+  always:
+    # Runs even if the edit above fails, so a bad run never leaves the CA down.
+    - name: Start the CA
+      ansible.builtin.systemd:
+        name: "{{ ipa_crl_service }}"
+        state: started
+
+- name: Wait for the CA agent port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ ipa_crl_agent_port }}"
+    timeout: "{{ ipa_crl_service_start_timeout }}"
+  when: ipa_crl_config_changed | bool

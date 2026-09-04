@@ -1,0 +1,25 @@
+---
+- name: Preflight
+  ansible.builtin.include_tasks: preflight.yml
+  tags: [ipa_crl, preflight, always]
+
+- name: Configure CRL validity in CS.cfg
+  ansible.builtin.include_tasks: configure.yml
+  tags: [ipa_crl, configure]
+
+# Run the regeneration handler here rather than at end of play, so the
+# validate phase inspects the CRL this run actually produced.
+- name: Flush pending handlers before validation
+  ansible.builtin.meta: flush_handlers
+  tags: [ipa_crl, configure]
+
+- name: Force CRL regeneration on demand
+  ansible.builtin.include_tasks: regenerate.yml
+  when:
+    - ipa_crl_force_regenerate | bool
+    - not (ipa_crl_config_changed | default(false) | bool)
+  tags: [ipa_crl, regenerate]
+
+- name: Validate the published CRL
+  ansible.builtin.include_tasks: validate.yml
+  tags: [ipa_crl, validate]
