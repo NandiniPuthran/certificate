@@ -1,24 +1,23 @@
 # roles/freeradius/tasks/crl.yml
-- name: Ensure the CRL directory exists
-  ansible.builtin.file:
-    path: "{{ freeradius_ca_path }}"
-    state: directory
-    owner: root
-    group: "{{ freeradius_group }}"
-    mode: "0750"
+- name: Check the CRL is present in the CRL path
+  ansible.builtin.stat:
+    path: "{{ freeradius_crl_src }}"
+  register: crl_src
 
-- name: Convert the CRL to PEM for the hashed directory
-  ansible.builtin.command:
-    cmd: >-
-      openssl crl -inform DER -outform PEM
-      -in {{ crl_file | quote }}
-      -out /tmp/.crl-stage.pem
-  changed_when: false
+- name: Fail here rather than at service start
+  ansible.builtin.assert:
+    that:
+      - crl_src.stat.exists
+      - crl_src.stat.size > 0
+    fail_msg: >-
+      {{ freeradius_crl_src }} is missing or empty. FreeRADIUS will reject
+      every EAP-TLS handshake once check_crl is on. Run crl_fetch first.
+    quiet: true
 
 - name: Install the CRL into ca_path
   ansible.builtin.copy:
-    src: /tmp/.crl-stage.pem
-    dest: "{{ freeradius_ca_path }}/{{ freeradius_crl_name }}.pem"
+    src: "{{ freeradius_crl_src }}"
+    dest: "{{ freeradius_ca_path }}/{{ freeradius_crl_name }}"
     remote_src: true
     owner: root
     group: "{{ freeradius_group }}"
@@ -29,7 +28,7 @@
   ansible.builtin.command:
     cmd: >-
       openssl crl -hash -noout
-      -in {{ freeradius_ca_path }}/{{ freeradius_crl_name }}.pem
+      -in {{ freeradius_ca_path }}/{{ freeradius_crl_name }}
   register: crl_hash
   changed_when: false
 
@@ -40,13 +39,13 @@
 
 - name: Rehash the directory
   ansible.builtin.command:
-    cmd: "c_rehash {{ freeradius_ca_path }}"
+    cmd: "{{ freeradius_rehash_cmd }} {{ freeradius_ca_path }}"
   when: crl_installed.changed or not crl_link.stat.exists
   register: crl_rehash
   changed_when: crl_rehash.rc == 0
   notify: restart freeradius
 
-- name: Confirm the CRL is now resolvable by hash
+- name: Confirm the CRL is resolvable by hash
   ansible.builtin.stat:
     path: "{{ freeradius_ca_path }}/{{ crl_hash.stdout | trim }}.r0"
   register: crl_link_final
