@@ -1,0 +1,10 @@
+---
+# Only one handler earns its place here.
+#
+# The service restart deliberately is NOT a handler: CS.cfg must be edited
+# while pki-tomcatd is stopped, so the stop has to precede the edit. Handlers
+# only fire afterwards, which is the wrong half of the bracket. That sequence
+# lives inline in configure.yml with an always: block so the CA comes back up
+# even on failure.
+- name: Force CRL regeneration
+  ansible.builtin.include_tasks: regenerate.yml

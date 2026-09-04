@@ -1,0 +1,57 @@
+---
+# ─── Paths and identifiers ────────────────────────────────────────────────
+ipa_crl_cs_cfg: /etc/pki/pki-tomcat/ca/CS.cfg
+ipa_crl_publish_path: /var/lib/ipa/pki-ca/publish/MasterCRL.bin
+ipa_crl_ra_cert: /var/lib/ipa/ra-agent.pem
+ipa_crl_ra_key: /var/lib/ipa/ra-agent.key
+ipa_crl_ca_bundle: /etc/ipa/ca.crt
+ipa_crl_service: pki-tomcatd@pki-tomcat.service
+ipa_crl_agent_port: 8443
+ipa_crl_issuing_point: MasterCRL
+ipa_crl_file_owner: pkiuser
+ipa_crl_file_group: pkiuser
+
+# ─── Validity model ───────────────────────────────────────────────────────
+# Two independent knobs. Do not conflate them:
+#
+#   autoUpdateInterval     -> how often the CRL is REBUILT.
+#                             This is your revocation propagation latency.
+#   nextUpdateGracePeriod  -> extra validity stacked on top of that.
+#                             This is your tolerance for distribution gaps.
+#
+#   published nextUpdate ~= thisUpdate + regen_minutes + grace_minutes
+#
+# Setting autoUpdateInterval to a year gives a year-long nextUpdate AND a
+# year-long revocation blind spot. Extend the grace period instead.
+ipa_crl_regen_minutes: 240 # 4 hours
+ipa_crl_grace_minutes: 525600 # 365 days
+
+# Upper bound enforced in preflight. Guards against someone "fixing" a short
+# nextUpdate by inflating the regeneration interval.
+ipa_crl_max_regen_minutes: 1440
+
+# ─── Behaviour switches ───────────────────────────────────────────────────
+ipa_crl_backup: true
+ipa_crl_force_regenerate: false # regenerate even when CS.cfg is unchanged
+ipa_crl_clear_cache: true # rebuild from LDAP rather than the in-memory cache
+ipa_crl_update_timeout: 600 # seconds to wait for signing to finish
+ipa_crl_service_start_timeout: 300
+ipa_crl_validate_tolerance: 0.95 # accept a small shortfall in the measured window
+
+# ─── Settings written to CS.cfg ───────────────────────────────────────────
+# enableDailyUpdates MUST be false. When it is true the next scheduled update
+# is the next dailyUpdates slot, so nextUpdate lands ~1 day out regardless of
+# autoUpdateInterval or the grace period.
+ipa_crl_settings:
+  - key: ca.crl.MasterCRL.enableCRLCache
+    value: "true"
+  - key: ca.crl.MasterCRL.enableCRLUpdates
+    value: "true"
+  - key: ca.crl.MasterCRL.enableUpdateInterval
+    value: "true"
+  - key: ca.crl.MasterCRL.enableDailyUpdates
+    value: "false"
+  - key: ca.crl.MasterCRL.autoUpdateInterval
+    value: "{{ ipa_crl_regen_minutes }}"
+  - key: ca.crl.MasterCRL.nextUpdateGracePeriod
+    value: "{{ ipa_crl_grace_minutes }}"

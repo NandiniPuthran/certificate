@@ -1,0 +1,4 @@
+---
+# Derived, not user-facing. Overriding this will not change the CA config.
+ipa_crl_expected_window_seconds: >-
+  {{ ((ipa_crl_regen_minutes | int) + (ipa_crl_grace_minutes | int)) * 60 }}

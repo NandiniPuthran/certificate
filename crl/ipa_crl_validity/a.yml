@@ -1,0 +1,53 @@
+# roles/freeradius/tasks/crl.yml
+- name: Ensure the CRL directory exists
+  ansible.builtin.file:
+    path: "{{ freeradius_ca_path }}"
+    state: directory
+    owner: root
+    group: "{{ freeradius_group }}"
+    mode: "0750"
+
+- name: Convert the CRL to PEM for the hashed directory
+  ansible.builtin.command:
+    cmd: >-
+      openssl crl -inform DER -outform PEM
+      -in {{ crl_file | quote }}
+      -out /tmp/.crl-stage.pem
+  changed_when: false
+
+- name: Install the CRL into ca_path
+  ansible.builtin.copy:
+    src: /tmp/.crl-stage.pem
+    dest: "{{ freeradius_ca_path }}/{{ freeradius_crl_name }}.pem"
+    remote_src: true
+    owner: root
+    group: "{{ freeradius_group }}"
+    mode: "0640"
+  register: crl_installed
+
+- name: Read the CRL issuer hash
+  ansible.builtin.command:
+    cmd: >-
+      openssl crl -hash -noout
+      -in {{ freeradius_ca_path }}/{{ freeradius_crl_name }}.pem
+  register: crl_hash
+  changed_when: false
+
+- name: Check for the hash symlink
+  ansible.builtin.stat:
+    path: "{{ freeradius_ca_path }}/{{ crl_hash.stdout | trim }}.r0"
+  register: crl_link
+
+- name: Rehash the directory
+  ansible.builtin.command:
+    cmd: "c_rehash {{ freeradius_ca_path }}"
+  when: crl_installed.changed or not crl_link.stat.exists
+  register: crl_rehash
+  changed_when: crl_rehash.rc == 0
+  notify: restart freeradius
+
+- name: Confirm the CRL is now resolvable by hash
+  ansible.builtin.stat:
+    path: "{{ freeradius_ca_path }}/{{ crl_hash.stdout | trim }}.r0"
+  register: crl_link_final
+  failed_when: not crl_link_final.stat.exists

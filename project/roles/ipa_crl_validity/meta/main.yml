@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  role_name: ipa_crl_validity
+  description: >-
+    Set the FreeIPA/Dogtag MasterCRL validity window and force a verified
+    regeneration on the CRL generation master.
+  license: MIT
+  min_ansible_version: "2.12"
+  platforms:
+    - name: EL
+      versions: [8, 9]
+    - name: Debian
+      versions: [bullseye, bookworm]
+    - name: Ubuntu
+      versions: [focal, jammy]
+  galaxy_tags:
+    - freeipa
+    - dogtag
+    - pki
+    - crl
+dependencies: []
