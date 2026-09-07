@@ -1,72 +1,83 @@
 ---
-# Drift detection first. Without this the role would bounce the CA on every
-# run, which is not acceptable on a production issuing CA.
-- name: Detect CS.cfg drift
-  ansible.builtin.lineinfile:
-    path: "{{ ipa_crl_cs_cfg }}"
-    regexp: "^{{ item.key | regex_escape }}="
-    line: "{{ item.key }}={{ item.value }}"
+- name: Read current values
+  ansible.builtin.command:
+    argv: "{{ ipa_crl_exec + ['pki-server', 'ca-config-show', item.key] }}"
   loop: "{{ ipa_crl_settings }}"
   loop_control:
     label: "{{ item.key }}"
-  check_mode: true
-  register: ipa_crl_drift
+  register: ipa_crl_current
+  changed_when: false
+  failed_when: false
 
-- name: Record whether CS.cfg needs changing
+# rc != 0 means the key is unset. ca-config-show prints "key=value", so take
+# what follows the first '='.
+- name: Build the drift list
   ansible.builtin.set_fact:
-    ipa_crl_config_changed: >-
-      {{ ipa_crl_drift.results | selectattr('changed') | list | length > 0 }}
+    ipa_crl_drift: "{{ (ipa_crl_drift | default([])) + [item.item] }}"
+  loop: "{{ ipa_crl_current.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when: >-
+    item.rc != 0 or
+    (item.stdout | trim | split('=') | last | trim)
+      != (item.item.value | string)
 
-- name: Report settings that will change
+- name: Report drift
   ansible.builtin.debug:
     msg: >-
-      {{ ipa_crl_drift.results | selectattr('changed')
-         | map(attribute='item.key') | list }}
-  when: ipa_crl_config_changed | bool
+      {{ ipa_crl_drift | default([]) | map(attribute='key') | list
+         | ternary(ipa_crl_drift | default([]) | map(attribute='key') | list,
+                   ['no change needed']) }}
 
-- name: Apply CRL configuration
-  when: ipa_crl_config_changed | bool
+- name: Apply CRL settings
+  when: ipa_crl_drift | default([]) | length > 0
   block:
-    - name: Back up CS.cfg
-      ansible.builtin.copy:
-        src: "{{ ipa_crl_cs_cfg }}"
-        dest: "{{ ipa_crl_cs_cfg }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
-        remote_src: true
-        owner: "{{ ipa_crl_file_owner }}"
-        group: "{{ ipa_crl_file_group }}"
-        mode: "0660"
-      when: ipa_crl_backup | bool
+    # pki-tomcatd holds its config in memory and writes it back over CS.cfg on
+    # shutdown. Editing while it runs looks like it worked and is reverted by
+    # the very restart you do to apply it.
+    - name: Stop the CA
+      ansible.builtin.command:
+        argv: "{{ ipa_crl_exec + ['systemctl', 'stop', ipa_crl_service] }}"
+      changed_when: true
 
-    # pki-tomcatd serialises its in-memory config back to CS.cfg on shutdown.
-    # Editing while it runs looks like it worked and is silently reverted.
-    - name: Stop the CA before editing CS.cfg
-      ansible.builtin.systemd:
-        name: "{{ ipa_crl_service }}"
-        state: stopped
-
-    - name: Write CRL settings
-      ansible.builtin.lineinfile:
-        path: "{{ ipa_crl_cs_cfg }}"
-        regexp: "^{{ item.key | regex_escape }}="
-        line: "{{ item.key }}={{ item.value }}"
-        owner: "{{ ipa_crl_file_owner }}"
-        group: "{{ ipa_crl_file_group }}"
-        mode: "0660"
-      loop: "{{ ipa_crl_settings }}"
+    - name: Write settings
+      ansible.builtin.command:
+        argv: >-
+          {{ ipa_crl_exec + ['pki-server', 'ca-config-set',
+                             item.key, item.value | string] }}
+      loop: "{{ ipa_crl_drift }}"
       loop_control:
-        label: "{{ item.key }}"
+        label: "{{ item.key }}={{ item.value }}"
+      changed_when: true
       notify: Force CRL regeneration
 
   always:
-    # Runs even if the edit above fails, so a bad run never leaves the CA down.
+    # Runs even if a set fails, so a bad run never leaves the CA down.
     - name: Start the CA
-      ansible.builtin.systemd:
-        name: "{{ ipa_crl_service }}"
-        state: started
+      ansible.builtin.command:
+        argv: "{{ ipa_crl_exec + ['systemctl', 'start', ipa_crl_service] }}"
+      changed_when: true
 
-- name: Wait for the CA agent port
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ ipa_crl_agent_port }}"
-    timeout: "{{ ipa_crl_service_start_timeout }}"
-  when: ipa_crl_config_changed | bool
+- name: Wait for the CA agent interface
+  ansible.builtin.command:
+    argv: "{{ ipa_crl_exec + ['ss', '-ltn', 'sport = :' ~ ipa_crl_agent_port] }}"
+  register: ipa_crl_agent
+  until: ipa_crl_agent.stdout is search(ipa_crl_agent_port | string)
+  retries: "{{ ipa_crl_service_start_retries }}"
+  delay: "{{ ipa_crl_service_start_delay }}"
+  changed_when: false
+  when: ipa_crl_drift | default([]) | length > 0
+
+- name: Verify the settings survived the restart
+  ansible.builtin.command:
+    argv: "{{ ipa_crl_exec + ['pki-server', 'ca-config-show', item.key] }}"
+  loop: "{{ ipa_crl_drift | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: ipa_crl_verify
+  changed_when: false
+  failed_when: >-
+    ipa_crl_verify.rc != 0 or
+    (ipa_crl_verify.stdout | trim | split('=') | last | trim)
+      != (item.value | string)
+  when: ipa_crl_drift | default([]) | length > 0
