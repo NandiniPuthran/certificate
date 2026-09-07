@@ -1,28 +1,25 @@
 ---
-# Caller sets ipa_crl_state_var to the fact name it wants populated, e.g.
+# Caller sets ipa_crl_state_var to the fact name it wants populated:
 #   - ansible.builtin.include_tasks: read_crl.yml
 #     vars:
 #       ipa_crl_state_var: ipa_crl_before
 #
-# Shelling out here is deliberate. openssl prints "Sep  4 12:00:00 2027 GMT"
-# with a padded day, which to_datetime cannot parse reliably; date(1) can.
+# Shelling out is deliberate: openssl prints "Sep  4 12:00:00 2027 GMT" with a
+# padded day, which to_datetime cannot parse reliably; date(1) can.
 - name: Read the published CRL
-  ansible.builtin.shell:
-    executable: /bin/bash
-    cmd: |
-      set -euo pipefail
-      crl={{ ipa_crl_publish_path | quote }}
-      read_field() {
-        openssl crl -inform DER -noout "$1" -in "$crl" | cut -d= -f2-
-      }
-      this=$(read_field -lastupdate)
-      next=$(read_field -nextupdate)
-      num=$(read_field -crlnumber)
+  ansible.builtin.command:
+    argv: "{{ ipa_crl_exec + ['sh', '-c', _cmd] }}"
+  vars:
+    _cmd: |
+      set -eu
+      crl={{ ipa_crl_publish_path }}
+      f() { openssl crl -inform DER -noout "$1" -in "$crl" | cut -d= -f2-; }
       printf '{"this_update": %s, "next_update": %s, "crl_number": "%s"}\n' \
-        "$(date -u -d "$this" +%s)" "$(date -u -d "$next" +%s)" "$num"
+        "$(date -u -d "$(f -lastupdate)" +%s)" \
+        "$(date -u -d "$(f -nextupdate)" +%s)" \
+        "$(f -crlnumber)"
   register: ipa_crl_read
   changed_when: false
-  check_mode: false
 
 - name: Store CRL state as {{ ipa_crl_state_var }}
   ansible.builtin.set_fact:
