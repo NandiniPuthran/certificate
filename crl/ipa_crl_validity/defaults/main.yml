@@ -1,5 +1,8 @@
 ---
 ---
+---
+ipa_crl_expected_window_seconds: >-
+  {{ ((ipa_crl_regen_minutes | int) + (ipa_crl_grace_minutes | int)) * 60 }}
 # â”€â”€â”€ Container â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 ipa_crl_container: ipa
 ipa_crl_service: pki-tomcatd@pki-tomcat.service
