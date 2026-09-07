@@ -1,4 +1,33 @@
 #  - haproxy
+
+vafs_instances: >-
+  {%- set out = [] -%}
+  {%- for e in query('community.general.filetree', vafs_root) | sort(attribute='path') -%}
+  {%-   set bn = e.path | basename -%}
+  {%-   if e.state == 'file' and bn.startswith('station') and bn.endswith('.yml') -%}
+  {%-     set d    = lookup('file', e.src) | from_yaml -%}
+  {%-     set rel  = e.path | dirname -%}
+  {%-     set stem = bn | splitext | first -%}
+  {%-     set _ = out.append({
+            'key':          rel ~ '/' ~ stem,
+            'outer':        rel | dirname | basename,
+            'folder':       rel | basename,
+            'stem':         stem,
+            'name':         stem,
+            'source':       e.src,
+            'type':         d.type            | default(None),
+            'site_name':    d['site-name']    | default(None),
+            'instance':     d.instance        | default(None),
+            'range':        d['range']        | default(None),
+            'id':           d.id              | default(None),
+            'display_name': d['display-name'] | default(d.display_name)
+                                              | default(d.displayName)
+                                              | default(None)}) -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ out }}
+
+  
 vafs_instances: >-
   {%- set out = [] -%}
   {%- for e in query('community.general.filetree', vafs_root) | sort(attribute='path') -%}
