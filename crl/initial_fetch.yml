@@ -1,91 +1,24 @@
----
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# crl_push â€” distribute the published CRL from the relay to the fleet.
-#
-# One role, two sides, selected per play with crl_push_mode:
-#   relay    â€” server1: holds the SSH key, pushes on a timer, tracks failures
-#   receiver â€” fleet:   forced-command entry point, validates and installs
-#
-# Independent of crl_fetch by design. It reads the published file and compares
-# checksums itself, so crl_fetch_on_change_hook stays EMPTY and nothing in
-# crl_fetch needs to change.
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-crl_push_mode: relay                   # relay | receiver
-
-# â”€â”€ The file being distributed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Must match crl_fetch_publish_dir / crl_fetch_filename on the relay.
-crl_push_source_dir: /var/www/crl
-crl_push_filename: MasterCRL.bin
-
-# â”€â”€ Relay identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Sharing the account with crl_fetch is supported. In group_vars:
-#   crl_push_user: crlfetch
-#   crl_push_create_user: false
-# and set crl_fetch_inaccessible_paths so the fetch service cannot read the SSH
-# key. systemd namespacing is per-unit, not per-user, so isolation survives.
-#
-# crl_push_create_user must be false for an existing user: ansible.builtin.user
-# with a different `home:` REWRITES the existing home directory rather than
-# skipping. The group is resolved at runtime in that case.
-crl_push_user: crlpush
-crl_push_create_user: true
-crl_push_group: "{{ crl_push_user }}"  # overridden at runtime when sharing
-
-crl_push_home: /var/lib/crl-push
-crl_push_state_dir: /var/lib/crl-push/state
-crl_push_log_dir: /var/log/crl-push
-crl_push_key: /var/lib/crl-push/.ssh/id_ed25519
-crl_push_known_hosts: /var/lib/crl-push/.ssh/known_hosts
-
-# â”€â”€ Targets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-crl_push_target_group: certificate
-crl_push_targets: >-
-  {{ groups[crl_push_target_group] | default([])
-     | map('extract', hostvars, 'ansible_fqdn')
-     | select('string') | list }}
-
-# â”€â”€ Transport â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Worst-case run length: ceil(targets / parallel) * ssh_timeout.
-# 500 hosts at 10 parallel and 30s = ~25 min. Keep crl_push_interval above it,
-# or retries get skipped by the flock.
-crl_push_parallel: 10
-crl_push_ssh_timeout: 30
-
-# â”€â”€ Schedule â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Shorter than crl_fetch on purpose. Most runs find an unchanged CRL and no
-# pending hosts and exit in milliseconds. The interval exists to retry hosts
-# that were unreachable, not to look for new CRLs.
-crl_push_interval: "*:0/30"
-crl_push_randomized_delay: 120
-
-# â”€â”€ Receiver identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Always separate â€” different host, nothing to share with.
-crl_push_recv_user: crlrecv
-
-# â”€â”€ Receiver validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Leave true. The relay is WAN-facing; verifying the CA signature here makes it
-# a transport rather than an authority, so a compromised relay cannot push a
-# forged EMPTY CRL â€” which revokes nothing â€” to the whole fleet. The lastUpdate
-# comparison additionally stops it replaying an older genuine CRL.
-crl_push_recv_verify: true
-crl_push_recv_ca_cert: /etc/ssl/certs/ipa-ca.crt
-
-# â”€â”€ Receiver install â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-crl_push_recv_dir: /etc/ssl/crl
-crl_push_recv_der: MasterCRL.bin
-crl_push_recv_pem: ipa-crl.pem
-crl_push_recv_pem_enabled: true
-crl_push_recv_state_dir: /var/lib/crl-push
-crl_push_recv_max_bytes: 33554432      # 32 MB ceiling on an inbound stream
-
-# POPULATE THIS. Empty means the CRL is installed and no service is told about
-# it, so the whole pipeline reports success while changing nothing.
-# Sudo is scoped to "systemctl reload <name>" for exactly these entries.
-crl_push_recv_reload_services: []
-#  - apache2
 #  - haproxy
-
+vafs_instances: >-
+  {%- set out = [] -%}
+  {%- for e in query('community.general.filetree', vafs_root) | sort(attribute='path') -%}
+  {%-   if e.state == 'file' and e.path | basename == 'display.yml' -%}
+  {%-     set d = lookup('file', e.src) | from_yaml -%}
+  {%-     set _ = out.append({
+            'key':          e.path | dirname,
+            'folder':       e.path | dirname | basename,
+            'source':       e.src,
+            'type':         d.type            | default(None),
+            'site_name':    d['site-name']    | default(None),
+            'instance':     d.instance        | default(None),
+            'range':        d['range']        | default(None),
+            'id':           d.id              | default(None),
+            'display_name': d['display-name'] | default(d.display_name)
+                                              | default(d.displayName)
+                                              | default(None)}) -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ out }}
 # â”€â”€ Relay public key (receiver side) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Set by the relay play via set_fact, or pinned in group_vars for split runs.
 crl_push_relay_public_key: ""
