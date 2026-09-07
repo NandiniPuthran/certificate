@@ -21,23 +21,24 @@
         >= ((ipa_crl_expected_window_seconds | int)
             * (ipa_crl_validate_tolerance | float)) | int
     fail_msg: >-
-      Window is {{ ((_window | int) / 86400) | round(1) }} days,
-      expected ~{{ ((ipa_crl_expected_window_seconds | int) / 86400) | round(1) }}.
-      A window of roughly one day means enableDailyUpdates is still true or
-      CS.cfg was edited while pki-tomcatd was running and got reverted.
+      Window is {{ ((_window | int) / 86400) | round(1) }} days, expected
+      ~{{ ((ipa_crl_expected_window_seconds | int) / 86400) | round(1) }}.
+      A window near one day means enableDailyUpdates is still true, or CS.cfg
+      was written while pki-tomcatd was running and got reverted.
     quiet: true
   vars:
     _window: "{{ ipa_crl_now.next_update | int - ipa_crl_now.this_update | int }}"
 
-# Once nextUpdate is a year out, "not expired" stops meaning "not stale".
-# Freshness has to be measured from thisUpdate instead.
+# Once nextUpdate is a year out, "not expired" stops meaning "not stale". A
+# CRL that stopped refreshing months ago still validates cleanly everywhere,
+# so freshness has to be measured from thisUpdate.
 - name: Warn when the CRL is stale relative to its rebuild interval
   ansible.builtin.debug:
     msg: >-
-      WARNING: CRL is {{ (_age / 3600) | round(1) }} h old but is rebuilt every
-      {{ ipa_crl_regen_minutes }} min. It is still inside its validity window,
-      so no consumer will complain. Check pki-tomcatd on the generation master.
-  when: _age > (ipa_crl_regen_minutes | int * 60 * 3)
+      WARNING: CRL is {{ ((_age | int) / 3600) | round(1) }} h old but is
+      rebuilt every {{ ipa_crl_regen_minutes }} min. It is still inside its
+      validity window, so no consumer will complain. Check pki-tomcatd.
+  when: (_age | int) > (ipa_crl_regen_minutes | int * 60 * 3)
   vars:
     _age: "{{ (ansible_date_time.epoch | int) - (ipa_crl_now.this_update | int) }}"
 
