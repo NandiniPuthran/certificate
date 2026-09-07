@@ -1,4 +1,23 @@
-# roles/freeradius/tasks/crl.yml
+
+# group_vars/all/vafs.yml
+vafs_root: "{{ inventory_dir }}/station_vafs"
+
+vafs_instances: >-
+  {%- set out = [] -%}
+  {%- for f in query('fileglob', vafs_root ~ '/*/display.yml') | sort -%}
+  {%-   set d = lookup('file', f) | from_yaml -%}
+  {%-   set _ = out.append({
+          'folder':    f | dirname | basename,
+          'source':    f,
+          'type':      d.type         | default(None),
+          'site_name': d['site-name'] | default(None),
+          'instance':  d.instance     | default(None),
+          'range':     d['range']     | default(None),
+          'id':        d.id           | default(None)}) -%}
+  {%- endfor -%}
+  {{ out }}
+  
+
 - name: Check the CRL is present in the CRL path
   ansible.builtin.stat:
     path: "{{ freeradius_crl_src }}"
