@@ -1,0 +1,50 @@
+---
+# RFC 5424 §6 grammar, built from named parts so each field is auditable
+# on its own. `[ ]` is a one-character class holding a literal space — it
+# survives YAML round-tripping where a bare space does not.
+#
+#   SYSLOG-MSG = HEADER SP STRUCTURED-DATA [SP MSG]
+#   HEADER     = PRI VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP
+#                PROCID SP MSGID
+
+_r5424_pri: '<(?:0|[1-9][0-9]{0,2})>'
+_r5424_ver: '[1-9][0-9]?'
+_r5424_ts: '(?:-|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2}))'
+_r5424_host: '(?:-|[!-~]{1,255})'
+_r5424_app: '(?:-|[!-~]{1,48})'
+_r5424_procid: '(?:-|[!-~]{1,128})'
+_r5424_msgid: '(?:-|[!-~]{1,32})'
+# SD-ELEMENT = "[" SD-ID *(SP SD-PARAM) "]" ; PARAM-VALUE escapes " \ and ]
+_r5424_sd: '(?:-|(?:\[[!-~]{1,32}(?:[ ][!-~]+="(?:[^"\\]|\\.)*")*\])+)'
+# MSG may be prefixed with a UTF-8 BOM. The frames come back through
+# stdout as decoded text, so match U+FEFF, not the three raw bytes.
+_r5424_msg: '(?:[ ](?:\ufeff)?[\s\S]*)?'
+
+# Optional RFC 6587 octet-counting prefix ("MSG-LEN SP SYSLOG-MSG")
+_r6587_prefix: "{{ '[0-9]{1,6}[ ]' if probe_expect_octet_counting | bool else '' }}"
+
+rfc5424_regex: >-
+  {{ '^' ~ _r6587_prefix ~ _r5424_pri ~ _r5424_ver ~ '[ ]' ~ _r5424_ts ~
+     '[ ]' ~ _r5424_host ~ '[ ]' ~ _r5424_app ~ '[ ]' ~ _r5424_procid ~
+     '[ ]' ~ _r5424_msgid ~ '[ ]' ~ _r5424_sd ~ _r5424_msg ~ '$' }}
+
+# Capture groups used by the individual field assertions
+rfc5424_pri_capture: "{{ '^' ~ _r6587_prefix ~ '<([0-9]{1,3})>' }}"
+rfc5424_ver_capture: "{{ '^' ~ _r6587_prefix ~ '<[0-9]{1,3}>([0-9]{1,2})[ ]' }}"
+rfc5424_ts_capture: "{{ '^' ~ _r6587_prefix ~ '<[0-9]{1,3}>[0-9]{1,2}[ ](' ~ _r5424_ts ~ ')' }}"
+
+# Index of each header field once the frame is split on spaces.
+# 0 = "<PRI>VERSION", 1 = TIMESTAMP, 2 = HOSTNAME, 3 = APP-NAME,
+# 4 = PROCID, 5 = MSGID, 6 = start of STRUCTURED-DATA
+probe_field_offset: "{{ 1 if probe_expect_octet_counting | bool else 0 }}"
+
+probe_pri: "{{ (probe_facility | int) * 8 + (probe_severity | int) }}"
+
+# file + rfc3164 syslog + rfc5424 syslog
+probe_expected_total: "{{ (probe_count | int) * 3 }}"
+
+probe_expected_hostnames:
+  - "{{ probe_fake_switch_host }}"
+  - "{{ probe_fake_clock_host }}"
+  - "{{ ansible_facts.hostname }}"
+  - "{{ ansible_facts.fqdn }}"

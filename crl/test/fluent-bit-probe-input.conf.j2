@@ -1,0 +1,47 @@
+# {{ ansible_managed }}
+# Fragment for /etc/fluent-bit/fluent-bit.conf on the collectors.
+
+[SERVICE]
+    # TC-08/TC-09 read this. Without it the metrics assertions cannot run.
+    HTTP_Server   On
+    HTTP_Listen   127.0.0.1
+    HTTP_Port     2020
+    Parsers_File  parsers.conf
+
+# TC-05 injects here.
+[INPUT]
+    Name              tail
+    Tag               probe.file
+    Path              {{ probe_tail_file }}
+    DB                /var/lib/fluent-bit/probe.db
+    Read_from_Head    Off
+    Refresh_Interval  1
+    Skip_Long_Lines   On
+
+# TC-06: switches. Most Cisco IOS / Aruba / Juniper gear emits RFC 3164 by
+# default, so this listener has to accept it even though NESS wants 5424.
+[INPUT]
+    Name              syslog
+    Tag               net.udp
+    Mode              udp
+    Listen            0.0.0.0
+    Port              {{ probe_syslog_udp_port }}
+    Parser            syslog-rfc3164
+    Buffer_Chunk_Size 32k
+    Buffer_Max_Size   256k
+
+# TC-07: NTP/GPS appliances that already speak 5424.
+[INPUT]
+    Name              syslog
+    Tag               net.tcp
+    Mode              tcp
+    Listen            0.0.0.0
+    Port              {{ probe_syslog_tcp_port }}
+    Parser            syslog-rfc5424
+
+[OUTPUT]
+    Name              forward
+    Match             *
+    Host              {{ probe_fluentd_host }}
+    Port              {{ probe_forward_port }}
+    Retry_Limit       False

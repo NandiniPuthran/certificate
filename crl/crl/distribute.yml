@@ -1,0 +1,50 @@
+---
+- name: Build the transfer list
+  ansible.builtin.set_fact:
+    _crlg_transfers: >-
+      {{ [
+           {'src': crl_generate_ca_cert,  'dest': crl_generate_ca_dest},
+           {'src': _crlg_pem,             'dest': crl_generate_crl_dest},
+           {'src': _crlg_der,             'dest': crl_generate_crl_der_dest}
+         ] | rejectattr('dest', 'equalto', '') | list }}
+
+- name: Checksum the sources on the control node
+  ansible.builtin.stat:
+    path: "{{ item.src }}"
+    get_checksum: true
+  loop: "{{ _crlg_transfers }}"
+  loop_control:
+    label: "{{ item.src }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: _crlg_src_stat
+
+- name: Ensure destination directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ crl_generate_owner }}"
+    group: "{{ crl_generate_group }}"
+    mode: "{{ crl_generate_dir_mode }}"
+  loop: >-
+    {{ (_crlg_transfers | map(attribute='dest') | map('dirname') | list
+        + ([crl_generate_marker | dirname] if crl_generate_marker | length > 0 else []))
+       | unique }}
+
+- name: Reset placeholder tracking
+  ansible.builtin.set_fact:
+    _crlg_still_ours: []
+
+- name: Distribute each file
+  ansible.builtin.include_tasks: distribute_one.yml
+  loop: "{{ _crlg_transfers }}"
+  loop_control:
+    loop_var: crlg_item
+    label: "{{ crlg_item.dest }}"
+
+- name: Manage the marker
+  ansible.builtin.import_tasks: marker.yml
+  when: crl_generate_marker | length > 0

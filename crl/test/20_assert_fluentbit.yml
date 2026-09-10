@@ -1,0 +1,44 @@
+---
+# Read-only. Confirms Fluent Bit both ingested and successfully shipped.
+# Metrics are counters, not content — they prove throughput moved, not that
+# *your* marker moved. TC-10 onward does that.
+
+- name: TC-08 | Poll Fluent Bit until the forward output advances
+  ansible.builtin.uri:
+    url: "{{ probe_fluentbit_metrics_url }}"
+    return_content: true
+  register: probe_fb_after
+  until: >-
+    (probe_fb_after.json.output[probe_fluentbit_output_name].proc_records | int)
+    > (probe_fb_before.json.output[probe_fluentbit_output_name].proc_records | int)
+  retries: "{{ ((probe_timeout | int) / 5) | round(0, 'ceil') | int }}"
+  delay: 5
+  changed_when: false
+  tags: [verify_fluentbit]
+
+- name: TC-09 | No new forward errors or exhausted retries during the run
+  vars:
+    _before: "{{ probe_fb_before.json.output[probe_fluentbit_output_name] }}"
+    _after: "{{ probe_fb_after.json.output[probe_fluentbit_output_name] }}"
+  ansible.builtin.assert:
+    that:
+      - (_after.errors | int) == (_before.errors | int)
+      - (_after.retries_failed | int) == (_before.retries_failed | int)
+    fail_msg: >-
+      Fluent Bit forward output degraded during the probe:
+      errors {{ _before.errors }}->{{ _after.errors }},
+      retries_failed {{ _before.retries_failed }}->{{ _after.retries_failed }}.
+      Records were accepted locally but did not all reach Fluentd.
+    quiet: true
+  tags: [verify_fluentbit]
+
+- name: TC-09b | Report ingest deltas per input plugin
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.key }}:
+      {{ (probe_fb_after.json.input[item.key].records | int)
+         - (probe_fb_before.json.input[item.key].records | int) }} new records
+  loop: "{{ probe_fb_after.json.input | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  tags: [verify_fluentbit]

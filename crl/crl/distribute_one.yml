@@ -1,0 +1,45 @@
+---
+- name: "Check the destination {{ crlg_item.dest }}"
+  ansible.builtin.stat:
+    path: "{{ crlg_item.dest }}"
+    get_checksum: true
+  register: _crlg_dest_stat
+
+# placeholder_only means something else owns this path once it has real
+# content - crl_fetch, IPA enrolment, whatever. Only fill the gap.
+- name: "Decide whether to write {{ crlg_item.dest }}"
+  ansible.builtin.set_fact:
+    _crlg_write: >-
+      {{ (not crl_generate_placeholder_only)
+         or (not _crlg_dest_stat.stat.exists)
+         or (_crlg_dest_stat.stat.size | default(0) | int == 0) }}
+
+- name: "Write {{ crlg_item.dest }}"
+  ansible.builtin.copy:
+    src: "{{ crlg_item.src }}"
+    dest: "{{ crlg_item.dest }}"
+    owner: "{{ crl_generate_owner }}"
+    group: "{{ crl_generate_group }}"
+    mode: "{{ crl_generate_file_mode }}"
+  when: _crlg_write | bool
+  notify: crl_generate reload services
+
+- name: "Re-check {{ crlg_item.dest }}"
+  ansible.builtin.stat:
+    path: "{{ crlg_item.dest }}"
+    get_checksum: true
+  changed_when: false
+  register: _crlg_dest_after
+
+- name: "Record whether {{ crlg_item.dest }} is still the file we wrote"
+  ansible.builtin.set_fact:
+    _crlg_still_ours: >-
+      {{ _crlg_still_ours
+         + ([crlg_item.dest] if _crlg_matches | bool else []) }}
+  vars:
+    _crlg_src_sum: >-
+      {{ (_crlg_src_stat.results
+          | selectattr('item.dest', 'equalto', crlg_item.dest)
+          | map(attribute='stat.checksum') | first) | default('__nosrc__') }}
+    _crlg_matches: >-
+      {{ _crlg_dest_after.stat.checksum | default('__nodest__') == _crlg_src_sum }}

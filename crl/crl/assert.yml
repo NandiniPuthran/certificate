@@ -1,0 +1,53 @@
+---
+- name: Assert required inputs are set
+  ansible.builtin.assert:
+    that:
+      - crl_generate_ca_cert | length > 0
+      - crl_generate_ca_key | length > 0
+      - crl_generate_days | int > 0
+    fail_msg: >-
+      crl_generate_ca_cert and crl_generate_ca_key must both be set to paths
+      on the control node, and crl_generate_days must be positive.
+    quiet: true
+  run_once: true
+  delegate_to: localhost
+  become: false
+
+- name: Assert at least one destination is configured
+  ansible.builtin.assert:
+    that:
+      - (crl_generate_crl_dest | length > 0)
+        or (crl_generate_crl_der_dest | length > 0)
+        or (crl_generate_ca_dest | length > 0)
+    fail_msg: "Nothing to distribute - set at least one *_dest variable."
+    quiet: true
+  run_once: true
+  delegate_to: localhost
+  become: false
+
+- name: Confirm the CA certificate and key exist on the control node
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ crl_generate_ca_cert }}"
+    - "{{ crl_generate_ca_key }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: _crlg_input_stat
+
+- name: Assert the CA certificate and key are readable
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.size > 0
+    fail_msg: "Missing or empty on the control node: {{ item.item }}"
+    quiet: true
+  loop: "{{ _crlg_input_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  run_once: true
+  delegate_to: localhost
+  become: false

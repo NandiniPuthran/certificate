@@ -1,0 +1,24 @@
+---
+- name: log_pipeline_test | end-to-end syslog probe
+  block:
+    - name: Preflight
+      ansible.builtin.import_tasks: 00_preflight.yml
+
+    - name: Inject
+      ansible.builtin.import_tasks: 10_inject.yml
+
+    - name: Verify Fluent Bit ingest and forward
+      ansible.builtin.import_tasks: 20_assert_fluentbit.yml
+
+    - name: Verify receipt at Fluentd
+      ansible.builtin.import_tasks: 30_assert_fluentd.yml
+
+    - name: Verify RFC 5424 framing on the NESS egress
+      ansible.builtin.import_tasks: 40_assert_rfc5424.yml
+
+  always:
+    - name: Cleanup
+      ansible.builtin.import_tasks: 90_cleanup.yml
+      when: probe_cleanup | bool
+
+  tags: [pipeline_test]

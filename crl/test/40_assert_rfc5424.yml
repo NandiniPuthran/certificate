@@ -1,0 +1,190 @@
+---
+# Validates the bytes Fluentd actually puts on the wire toward NESS.
+#
+# This only means anything if the wire tap uses the *same* <format> block as
+# the real NESS store — see templates/fluentd-probe-tap.conf.j2, which pulls
+# both from one @include so they cannot drift apart.
+
+- name: TC-14 | Probe frames reach the egress wire tap
+  ansible.builtin.wait_for:
+    path: "{{ wire_capture_file }}"
+    search_regex: "{{ probe_marker | regex_escape }}"
+    timeout: "{{ probe_timeout }}"
+  delegate_to: "{{ wire_capture_host }}"
+  changed_when: false
+  tags: [verify_format]
+
+- name: TC-14 | Pull this run's frames off the wire tap
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: "grep -F -- '{{ probe_marker }}' '{{ wire_capture_file }}' || true"
+  delegate_to: "{{ wire_capture_host }}"
+  register: probe_wire
+  changed_when: false
+  until: (probe_wire.stdout_lines | length) >= (probe_expected_total | int)
+  retries: 6
+  delay: 5
+  failed_when: false
+  tags: [verify_format]
+
+- name: TC-14 | Every injected record survived to the NESS egress
+  ansible.builtin.assert:
+    that:
+      - (probe_wire.stdout_lines | length) == (probe_expected_total | int)
+    fail_msg: >-
+      {{ probe_wire.stdout_lines | length }}/{{ probe_expected_total }} frames
+      on the egress. Records reached Fluentd (TC-11 passed) but were dropped
+      or filtered between Fluentd's input and its NESS output.
+    quiet: true
+  tags: [verify_format]
+
+- name: TC-15 | Every frame matches the RFC 5424 grammar
+  ansible.builtin.assert:
+    that:
+      - item is match(rfc5424_regex)
+    fail_msg: |-
+      Frame is not valid RFC 5424:
+        {{ item }}
+      Expected: <PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD [MSG]
+    quiet: true
+  loop: "{{ probe_wire.stdout_lines }}"
+  loop_control:
+    label: "{{ item[:72] }}"
+  tags: [verify_format]
+
+- name: TC-16 | PRI is in range and decodes to the expected facility/severity
+  vars:
+    _pri: '{{ item | regex_search(rfc5424_pri_capture, "\\1") | first | int }}'
+  ansible.builtin.assert:
+    that:
+      - (_pri | int) >= 0
+      - (_pri | int) <= 191
+      - ((_pri | int) // 8) == (probe_facility | int)
+      - ((_pri | int) % 8) == (probe_severity | int)
+    fail_msg: >-
+      PRI {{ _pri }} decodes to facility {{ (_pri | int) // 8 }} /
+      severity {{ (_pri | int) % 8 }}; expected {{ probe_facility }} /
+      {{ probe_severity }}. A PRI of 13 or 14 usually means Fluentd stamped
+      its own default instead of carrying the device's.
+    quiet: true
+  loop: "{{ probe_wire.stdout_lines }}"
+  loop_control:
+    label: "{{ item[:72] }}"
+  tags: [verify_format]
+
+- name: TC-17 | SYSLOG-VERSION is 1
+  vars:
+    _ver: '{{ item | regex_search(rfc5424_ver_capture, "\\1") | first }}'
+  ansible.builtin.assert:
+    that:
+      - _ver == '1'
+    fail_msg: "VERSION is '{{ _ver }}', not 1 — this frame is not RFC 5424."
+    quiet: true
+  loop: "{{ probe_wire.stdout_lines }}"
+  loop_control:
+    label: "{{ item[:72] }}"
+  tags: [verify_format]
+
+# ── The one that usually fails first ─────────────────────────────────────────
+- name: TC-18 | HOSTNAME carries the originating device, not a collector
+  vars:
+    _host: "{{ item.split(' ')[(probe_field_offset | int) + 2] }}"
+  ansible.builtin.assert:
+    that:
+      - _host in probe_expected_hostnames
+    fail_msg: >-
+      HOSTNAME is '{{ _host }}'. The device identity was overwritten in the
+      chain — almost always Fluent Bit's syslog input dropping the parsed
+      `host` key, or Fluentd's formatter defaulting to its own hostname.
+      In NESS every switch will look like this collector.
+    quiet: true
+  loop: "{{ probe_wire.stdout_lines }}"
+  loop_control:
+    label: "{{ item[:72] }}"
+  tags: [verify_format]
+
+- name: TC-19 | APP-NAME is preserved end to end
+  vars:
+    _app: "{{ item.split(' ')[(probe_field_offset | int) + 3] }}"
+  ansible.builtin.assert:
+    that:
+      - _app == probe_app
+    fail_msg: >-
+      APP-NAME is '{{ _app }}', expected '{{ probe_app }}'. If this reads
+      'fluentd' or '-', the tag/ident is not being mapped into APP-NAME.
+    quiet: true
+  loop: "{{ probe_wire.stdout_lines }}"
+  loop_control:
+    label: "{{ item[:72] }}"
+  tags: [verify_format]
+
+- name: TC-20 | STRUCTURED-DATA is well formed (an element or NILVALUE)
+  vars:
+    _sd: "{{ item.split(' ')[(probe_field_offset | int) + 6] }}"
+  ansible.builtin.assert:
+    that:
+      - _sd is match('^(-|\[)')
+    fail_msg: >-
+      STRUCTURED-DATA field is '{{ _sd }}'. RFC 5424 requires either a
+      NILVALUE '-' or one or more [SD-ID ...] elements at this position.
+    quiet: true
+  loop: "{{ probe_wire.stdout_lines }}"
+  loop_control:
+    label: "{{ item[:72] }}"
+  tags: [verify_format]
+
+# ── Clock correctness ────────────────────────────────────────────────────────
+# Matters most for the RFC 3164 switch path: 3164 carries no year and no
+# timezone, so something downstream has to invent both. This is where a wrong
+# guess shows up.
+- name: TC-21 | Resolve egress timestamps to epoch
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      while IFS= read -r ts; do
+        [ -n "$ts" ] || continue
+        date -u -d "$ts" +%s
+      done <<'PROBE_EOF'
+      {{ probe_wire.stdout_lines
+         | map('regex_search', rfc5424_ts_capture, "\\1")
+         | map('first') | join('\n') }}
+      PROBE_EOF
+  delegate_to: "{{ wire_capture_host }}"
+  register: probe_ts_epochs
+  changed_when: false
+  tags: [verify_format]
+
+- name: TC-21 | Timestamps are within {{ probe_max_clock_skew_seconds }}s of injection
+  ansible.builtin.assert:
+    that:
+      - (((item | int) - (probe_epoch_before | int)) | abs)
+        <= (probe_max_clock_skew_seconds | int)
+    fail_msg: >-
+      Egress timestamp is {{ ((item | int) - (probe_epoch_before | int)) | abs }}s
+      from the injection instant. An offset near a whole year means the RFC 3164
+      year was inferred wrong; an offset near a whole number of hours means a
+      timezone was applied twice or not at all.
+    quiet: true
+  loop: "{{ probe_ts_epochs.stdout_lines }}"
+  tags: [verify_format]
+
+- name: TC-22 | MSG body survived intact
+  ansible.builtin.assert:
+    that:
+      - probe_marker in item
+      - "'seq=' in item"
+    fail_msg: "MSG was truncated or rewritten: {{ item }}"
+    quiet: true
+  loop: "{{ probe_wire.stdout_lines }}"
+  loop_control:
+    label: "{{ item[:72] }}"
+  tags: [verify_format]
+
+- name: Verify | Result
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ probe_expected_total }} probes injected,
+      {{ probe_fd_count.stdout }} at Fluentd,
+      {{ probe_wire.stdout_lines | length }} valid RFC 5424 frames toward NESS.
+  tags: [verify_format]

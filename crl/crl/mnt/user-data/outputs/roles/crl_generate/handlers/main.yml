@@ -1,0 +1,7 @@
+---
+- name: crl_generate reload services
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: reloaded
+  loop: "{{ crl_generate_reload_services }}"
+  when: crl_generate_reload_services | length > 0

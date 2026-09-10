@@ -1,0 +1,103 @@
+---
+- name: Generate CRL
+  when: _crlg_needed | bool
+  delegate_to: localhost
+  become: false
+  run_once: true
+  block:
+
+    - name: Ensure artifact and CA state directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ crl_generate_artifact_dir }}"
+        - "{{ crl_generate_state_dir }}"
+
+    # openssl needs both to exist. force: false means an established CA state
+    # is never reset, so CRL numbers keep incrementing across runs.
+    - name: Initialise the certificate index
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ crl_generate_state_dir }}/index.txt"
+        mode: "0644"
+        force: false
+
+    - name: Initialise the CRL number counter
+      ansible.builtin.copy:
+        content: "1000\n"
+        dest: "{{ crl_generate_state_dir }}/crlnumber"
+        mode: "0644"
+        force: false
+
+    - name: Create a working directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: crl_generate
+      register: _crlg_tmp
+
+    - name: Render the openssl configuration
+      ansible.builtin.template:
+        src: openssl-crl.cnf.j2
+        dest: "{{ _crlg_tmp.path }}/openssl-crl.cnf"
+        mode: "0600"
+
+    # The passphrase is passed through the environment rather than argv so it
+    # does not appear in the process list on the control node.
+    - name: Sign the CRL
+      ansible.builtin.command:
+        argv: >-
+          {{ ['openssl', 'ca',
+              '-config', _crlg_tmp.path ~ '/openssl-crl.cnf',
+              '-gencrl',
+              '-crldays', crl_generate_days | string,
+              '-out', _crlg_tmp.path ~ '/new.crl.pem']
+             + (['-passin', 'env:CRL_GENERATE_CA_PASS']
+                if crl_generate_ca_key_passphrase | length > 0 else []) }}
+      environment:
+        CRL_GENERATE_CA_PASS: "{{ crl_generate_ca_key_passphrase }}"
+      no_log: true
+      changed_when: true
+
+    - name: Confirm the new CRL verifies against the CA before publishing it
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - crl
+          - -in
+          - "{{ _crlg_tmp.path }}/new.crl.pem"
+          - -CAfile
+          - "{{ crl_generate_ca_cert }}"
+          - -noout
+      changed_when: false
+
+    - name: Publish the CRL artifact
+      ansible.builtin.copy:
+        src: "{{ _crlg_tmp.path }}/new.crl.pem"
+        dest: "{{ _crlg_pem }}"
+        mode: "0644"
+        remote_src: true
+
+    - name: Publish a DER copy
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - crl
+          - -inform
+          - PEM
+          - -in
+          - "{{ _crlg_pem }}"
+          - -outform
+          - DER
+          - -out
+          - "{{ _crlg_der }}"
+      changed_when: true
+      when: crl_generate_crl_der_dest | length > 0
+
+  always:
+    - name: Remove the working directory
+      ansible.builtin.file:
+        path: "{{ _crlg_tmp.path | default('') }}"
+        state: absent
+      when: _crlg_tmp.path is defined

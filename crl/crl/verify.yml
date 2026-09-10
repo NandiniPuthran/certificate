@@ -1,0 +1,24 @@
+---
+- name: Verify the published CRL
+  when: crl_generate_validate | bool
+  delegate_to: localhost
+  become: false
+  run_once: true
+  block:
+
+    - name: Read CRL details
+      ansible.builtin.shell:
+        cmd: |
+          set -uo pipefail
+          crl="{{ _crlg_pem }}"
+          openssl crl -in "$crl" -CAfile "{{ crl_generate_ca_cert }}" -noout 2>&1
+          openssl crl -in "$crl" -noout -issuer -lastupdate -nextupdate -nameopt RFC2253
+          echo "revoked entries: $(openssl crl -in "$crl" -noout -text | grep -c 'Serial Number:' || true)"
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+      register: _crlg_details
+
+    - name: Report CRL details
+      ansible.builtin.debug:
+        var: _crlg_details.stdout_lines

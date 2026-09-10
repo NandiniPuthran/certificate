@@ -1,0 +1,89 @@
+---
+# Read-only against Fluentd. Reads the permanent probe tap — this role never
+# edits Fluentd config or reloads the service.
+
+- name: TC-10 | Marker reaches the Fluentd probe tap
+  ansible.builtin.wait_for:
+    path: "{{ fluentd_tap_file }}"
+    search_regex: "{{ probe_marker | regex_escape }}"
+    timeout: "{{ probe_timeout }}"
+  delegate_to: "{{ probe_fluentd_host }}"
+  changed_when: false
+  tags: [verify_fluentd]
+
+- name: TC-11 | Count this run's records at Fluentd
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: "grep -c -F -- '{{ probe_marker }}' '{{ fluentd_tap_file }}' || true"
+  delegate_to: "{{ probe_fluentd_host }}"
+  register: probe_fd_count
+  changed_when: false
+  # give the buffer one flush interval to settle before counting
+  until: (probe_fd_count.stdout | int) >= (probe_expected_total | int)
+  retries: 6
+  delay: 5
+  failed_when: false
+  tags: [verify_fluentd]
+
+- name: TC-11 | No loss between injection and Fluentd
+  ansible.builtin.assert:
+    that:
+      - (probe_fd_count.stdout | int) == (probe_expected_total | int)
+    fail_msg: >-
+      Expected {{ probe_expected_total }} records at Fluentd
+      ({{ probe_count }} each from file, RFC 3164 UDP and RFC 5424 TCP),
+      found {{ probe_fd_count.stdout }}. A shortfall of exactly
+      {{ probe_count }} points at one dead input; UDP loss is usually a
+      receive-buffer or MTU problem, not Fluent Bit.
+    quiet: true
+  tags: [verify_fluentd]
+
+- name: TC-12 | All three source paths are represented
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: >-
+      grep -F -- '{{ probe_marker }}' '{{ fluentd_tap_file }}'
+      | grep -c -F -- 'source={{ item }}' || true
+  delegate_to: "{{ probe_fluentd_host }}"
+  loop: [file, switch3164, clock5424]
+  register: probe_per_source
+  changed_when: false
+  tags: [verify_fluentd]
+
+- name: TC-12 | Each source contributed exactly {{ probe_count }} records
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | int) == (probe_count | int)
+    fail_msg: >-
+      source={{ item.item }} delivered {{ item.stdout }}/{{ probe_count }}
+      records to Fluentd.
+    quiet: true
+  loop: "{{ probe_per_source.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  tags: [verify_fluentd]
+
+- name: TC-13 | Fluentd has no output buffer backlog or retries
+  when: probe_fluentd_monitor_enabled | bool
+  block:
+    - name: TC-13 | Query the Fluentd monitor agent
+      ansible.builtin.uri:
+        url: "{{ probe_fluentd_monitor_url }}"
+        return_content: true
+      delegate_to: "{{ probe_fluentd_host }}"
+      register: probe_fd_plugins
+      changed_when: false
+
+    - name: TC-13 | Assert no plugin is in retry
+      ansible.builtin.assert:
+        that:
+          - (item.retry_count | default(0) | int) == 0
+        fail_msg: >-
+          Fluentd plugin {{ item.plugin_id }} ({{ item.type }}) is retrying —
+          retry_count={{ item.retry_count }}. Records may be queued rather
+          than delivered to NESS.
+        quiet: true
+      loop: "{{ probe_fd_plugins.json.plugins }}"
+      loop_control:
+        label: "{{ item.plugin_id }}"
+  tags: [verify_fluentd]

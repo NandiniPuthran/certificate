@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: crl_generate
+  description: >-
+    Generate a CRL from a CA certificate and key held on the control node,
+    then distribute the CRL and CA certificate to managed hosts.
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - all
+dependencies: []

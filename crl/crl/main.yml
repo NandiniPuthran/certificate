@@ -1,0 +1,61 @@
+---
+# ---------------------------------------------------------------------------
+# crl_generate
+#
+# Given a CA certificate and its private key, produce a CRL and distribute it
+# (with the CA certificate) to the hosts that need it.
+#
+# The key never leaves the control node. Generation happens once per run,
+# locally; only the resulting CRL and CA certificate are copied to targets.
+# ---------------------------------------------------------------------------
+
+# Label for this CA. Keeps state and artifacts separate when the role is used
+# for more than one CA in the same repo.
+crl_generate_name: local-ca
+
+# --- inputs (control node paths) -----------------------------------------
+crl_generate_ca_cert: ""                  # required
+crl_generate_ca_key: ""                   # required
+crl_generate_ca_key_passphrase: ""        # optional; vault this if used
+
+# --- CRL properties -------------------------------------------------------
+crl_generate_days: 3650                   # validity of the generated CRL
+crl_generate_digest: sha256
+# Regenerate when fewer than this many days remain. Set high to refresh often.
+crl_generate_renew_before_days: 90
+crl_generate_force: false                 # regenerate regardless
+
+# --- where generated artifacts and CA state live on the control node ------
+# Both should be writable and, ideally, committed so CRL numbers stay
+# monotonic across control nodes. Override if playbook_dir is read-only.
+crl_generate_artifact_dir: "{{ playbook_dir }}/generated/crl"
+crl_generate_state_dir: "{{ playbook_dir }}/generated/crl-state/{{ crl_generate_name }}"
+
+# --- destinations on the managed hosts ------------------------------------
+crl_generate_crl_dest: /etc/ssl/crl/MasterCRL.pem
+crl_generate_crl_der_dest: ""             # optional DER copy; "" to skip
+crl_generate_ca_dest: /etc/ssl/certs/ipa-ca.pem   # "" to skip
+
+# true  -> only write when the destination is missing or empty. Use this when
+#          something else (crl_fetch, IPA enrolment) owns the file later.
+# false -> keep the destination in sync with the generated CRL. Use this when
+#          this role is the authority for that path.
+crl_generate_placeholder_only: true
+
+# Written while the destination still matches what this role generated.
+# Set to "" to disable. Useful for alerting when placeholder_only is true.
+crl_generate_marker: /etc/ssl/.crl-from-local-ca
+
+crl_generate_owner: root
+crl_generate_group: root
+crl_generate_dir_mode: "0755"
+# CA certificates and CRLs are public data; world-readable is intentional so
+# unprivileged service users can read them.
+crl_generate_file_mode: "0644"
+
+# Services to reload when the CRL changes on a host. Empty by default -
+# nothing is touched unless you ask. Note reload semantics differ per service
+# (apache2 and haproxy pick up a new CRL on reload; rsyslog needs a restart).
+crl_generate_reload_services: []
+
+crl_generate_validate: true

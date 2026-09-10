@@ -1,0 +1,66 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Topology
+# ─────────────────────────────────────────────────────────────────────────────
+probe_fluentd_host: "{{ groups['fluentd'] | first }}"
+
+# The address network devices (switches, NTP/GPS clocks) point their syslog at.
+# This is the Fluent Bit collector currently being tested.
+probe_syslog_host: "{{ ansible_facts.default_ipv4.address }}"
+probe_syslog_udp_port: 514
+probe_syslog_tcp_port: 5140
+
+# Fluent Bit -> Fluentd
+probe_forward_port: 24224
+
+probe_fluentbit_bin: /opt/fluent-bit/bin/fluent-bit
+probe_fluentbit_conf: /etc/fluent-bit/fluent-bit.conf
+
+# Fluent Bit: requires `HTTP_Server On` in the [SERVICE] block.
+probe_fluentbit_metrics_url: "http://127.0.0.1:2020/api/v1/metrics"
+# Key of the forward output in the metrics JSON. Check the endpoint by hand
+# once: it is "<plugin>.<ordinal>" in declaration order, e.g. forward.0
+probe_fluentbit_output_name: "forward.0"
+
+# Fluentd: requires the in_monitor_agent source. Optional — used by TC-13 only.
+probe_fluentd_monitor_url: "http://127.0.0.1:24220/api/plugins.json"
+probe_fluentd_monitor_enabled: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Probe identity
+#
+# probe_app is the APP-NAME / tag that carries the synthetic traffic all the
+# way to NESS. Give it a dedicated routing rule in NESS (drop, or a throwaway
+# index) BEFORE the first run, or every probe becomes billable ingest and a
+# potential alert.
+# ─────────────────────────────────────────────────────────────────────────────
+probe_app: "pipeline-probe"
+probe_msgid: "ANSIBLEPROBE"
+probe_sd_id: "probe@32473"          # replace 32473 with your own PEN
+probe_count: 5                      # lines injected per source, per host
+
+probe_facility: 20                  # local4
+probe_severity: 5                   # notice  ->  PRI = 20*8+5 = 165
+
+# Hostnames the probe impersonates. These must match what your real devices
+# send, otherwise TC-16 is not testing the thing you care about.
+probe_fake_switch_host: "probe-switch-01"
+probe_fake_clock_host: "probe-clock-01"
+
+probe_timeout: 60                   # seconds to wait at each hop
+probe_max_clock_skew_seconds: 120
+
+# Set true if Fluentd -> NESS uses RFC 6587 octet counting ("123 <165>1 ...").
+probe_expect_octet_counting: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Taps  (deployed once by your pipeline role — NOT created by this test role)
+# ─────────────────────────────────────────────────────────────────────────────
+probe_tail_file: /var/log/pipeline-probe/injected.log   # Fluent Bit tails this
+fluentd_tap_file: /var/log/fluentd/pipeline-probe.log   # proves Fluentd receipt
+
+wire_capture_host: "{{ probe_fluentd_host }}"
+wire_capture_file: /var/log/pipeline-probe-wire.log     # exact egress bytes
+wire_capture_port: 5514
+
+probe_cleanup: true

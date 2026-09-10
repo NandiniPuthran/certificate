@@ -1,0 +1,108 @@
+---
+# This phase is the only part that writes. Injection is inherently
+# non-idempotent — you cannot "converge" an event onto a wire. It is made
+# safe by three things instead:
+#   1. every run carries a unique marker, so runs never alias each other
+#   2. everything goes to a dedicated APP-NAME you can route/drop in NESS
+#   3. 90_cleanup.yml removes this run's marker lines from the injection file
+
+- name: Inject | Record the injection instant, in UTC, from the injecting host
+  ansible.builtin.command: date -u +%s
+  register: probe_t0
+  changed_when: false
+  tags: [inject]
+
+- name: Inject | Build a unique marker for this run
+  ansible.builtin.set_fact:
+    probe_epoch_before: "{{ probe_t0.stdout | int }}"
+    probe_marker: >-
+      PROBE-{{ probe_t0.stdout }}-{{ 999999999 | random }}-{{
+      inventory_hostname | replace('.', '_') }}
+  tags: [inject]
+
+- name: Inject | Ensure the injection directory exists
+  ansible.builtin.file:
+    path: "{{ probe_tail_file | dirname }}"
+    state: directory
+    owner: root
+    group: adm
+    mode: "0750"
+  tags: [inject]
+
+- name: Inject | Ensure the injection file exists
+  ansible.builtin.file:
+    path: "{{ probe_tail_file }}"
+    state: touch
+    owner: root
+    group: adm
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  tags: [inject]
+
+# ── TC-05 ────────────────────────────────────────────────────────────────────
+- name: TC-05 | Inject {{ probe_count }} lines into the Fluent Bit tail path
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      for i in $(seq 1 {{ probe_count }}); do
+        printf '%s %s %s[%s]: %s seq=%d source=file\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" \
+          "$(hostname -s)" \
+          '{{ probe_app }}' "$$" \
+          '{{ probe_marker }}' "$i"
+      done >> '{{ probe_tail_file }}'
+  changed_when: true
+  tags: [inject]
+
+# ── TC-06 ────────────────────────────────────────────────────────────────────
+# Impersonates a switch. `logger` cannot set HOSTNAME, so the frame is written
+# by hand through bash's /dev/udp — no socat, ncat or nmap package required,
+# which matters on air-gapped boxes. Each printf is one write(), so one
+# datagram.
+- name: TC-06 | Inject RFC 3164 frames as a switch would (UDP {{ probe_syslog_udp_port }})
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      exec 3<>/dev/udp/{{ probe_syslog_host }}/{{ probe_syslog_udp_port }}
+      for i in $(seq 1 {{ probe_count }}); do
+        printf '<%d>%s %s %s: %s seq=%d source=switch3164\n' \
+          {{ probe_pri }} \
+          "$(LC_ALL=C date '+%b %e %H:%M:%S')" \
+          '{{ probe_fake_switch_host }}' \
+          '{{ probe_app }}' \
+          '{{ probe_marker }}' "$i" >&3
+      done
+      exec 3>&-
+  changed_when: true
+  tags: [inject]
+
+# ── TC-07 ────────────────────────────────────────────────────────────────────
+# Impersonates an NTP/GPS appliance that already speaks RFC 5424, including a
+# STRUCTURED-DATA element — this is what proves SD survives the chain.
+- name: TC-07 | Inject RFC 5424 frames as a clock would (TCP {{ probe_syslog_tcp_port }})
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      exec 3<>/dev/tcp/{{ probe_syslog_host }}/{{ probe_syslog_tcp_port }}
+      for i in $(seq 1 {{ probe_count }}); do
+        printf '<%d>1 %s %s %s - %s [%s seq="%d" src="clock5424"] %s seq=%d source=clock5424\n' \
+          {{ probe_pri }} \
+          "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" \
+          '{{ probe_fake_clock_host }}' \
+          '{{ probe_app }}' \
+          '{{ probe_msgid }}' \
+          '{{ probe_sd_id }}' "$i" \
+          '{{ probe_marker }}' "$i" >&3
+      done
+      exec 3>&-
+  changed_when: true
+  tags: [inject]
+
+- name: Inject | Marker for this run
+  ansible.builtin.debug:
+    msg: "{{ probe_marker }} — grep this on any hop to trace the run by hand"
+  tags: [inject]

@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+# /etc/fluent/conf.d/rfc5424-format.conf
+#
+# ONE definition, included by both the NESS store and the wire tap.
+#
+# Uses only core out_tcp + record_transformer + format single_value, so it
+# needs no gems. That matters on air-gapped hosts, where installing
+# fluent-plugin-remote_syslog or fluent-plugin-formatter_rfc5424 means
+# vendoring the gem and its dependency tree by hand.
+#
+# Cost: enable_ruby true. String concatenation cannot be done with the
+# non-Ruby placeholder syntax. Budget roughly 20-30% throughput against a
+# pure-placeholder filter; at a few thousand eps on a modern box this is
+# not the bottleneck, but measure before you assume.
+
+<format>
+  @type single_value
+  message_key rfc5424_line
+  add_newline true
+</format>

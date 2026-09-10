@@ -1,0 +1,71 @@
+# {{ ansible_managed }}
+#
+# Deploy from your Fluentd role, NOT from log_pipeline_test. The test role
+# reads these taps and must never reload Fluentd mid-test.
+#
+# Carry the device fields out of what Fluent Bit's syslog parser produced.
+# If these keys are missing, TC-18/TC-19 fail — which is the point.
+<filter net.** probe.**>
+  @type record_transformer
+  <record>
+    sd_host   ${record["host"]        || record["hostname"] || "-"}
+    sd_app    ${record["ident"]       || record["appname"]  || "-"}
+    sd_procid ${record["pid"]         || "-"}
+    sd_msgid  ${record["msgid"]       || "-"}
+    sd_pri    ${record["pri"]         || "165"}
+  </record>
+</filter>
+
+<match net.** probe.**>
+  @type copy
+  copy_mode deep
+
+  # (1) Receipt tap — proves the record reached Fluentd at all. TC-10..TC-12.
+  <store>
+    @type file
+    path {{ fluentd_tap_file | regex_replace('\.log$', '') }}
+    append true
+    add_path_suffix true
+    path_suffix .log
+    <format>
+      @type json
+    </format>
+    <buffer>
+      @type file
+      path /var/lib/fluentd/buf/probe-receipt
+      flush_mode interval
+      flush_interval 1s
+      chunk_limit_size 1m
+    </buffer>
+  </store>
+
+  # (2) The real egress to NESS.
+  <store>
+    @type tcp
+    host {{ ness_host | default('ness.example.internal') }}
+    port {{ ness_port | default(601) }}
+    @include /etc/fluent/conf.d/rfc5424-format.conf
+    <buffer>
+      @type file
+      path /var/lib/fluentd/buf/ness
+      flush_interval 5s
+      retry_type exponential_backoff
+    </buffer>
+  </store>
+
+  # (3) Wire tap — identical @include, so the bytes captured here are byte-for-
+  # byte what store (2) sends. If you inline the format here instead of
+  # including it, the two WILL drift and TC-15..TC-22 stop meaning anything.
+  <store>
+    @type tcp
+    host 127.0.0.1
+    port {{ wire_capture_port }}
+    @include /etc/fluent/conf.d/rfc5424-format.conf
+    <buffer>
+      @type file
+      path /var/lib/fluentd/buf/wiretap
+      flush_mode interval
+      flush_interval 1s
+    </buffer>
+  </store>
+</match>

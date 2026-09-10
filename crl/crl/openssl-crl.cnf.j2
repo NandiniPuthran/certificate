@@ -1,0 +1,15 @@
+# Managed by the crl_generate role - regenerated on each CRL generation.
+[ ca ]
+default_ca = crl_generate
+
+[ crl_generate ]
+database         = {{ crl_generate_state_dir }}/index.txt
+crlnumber        = {{ crl_generate_state_dir }}/crlnumber
+certificate      = {{ crl_generate_ca_cert }}
+private_key      = {{ crl_generate_ca_key }}
+default_md       = {{ crl_generate_digest }}
+default_crl_days = {{ crl_generate_days }}
+crl_extensions   = crl_ext
+
+[ crl_ext ]
+authorityKeyIdentifier = keyid:always

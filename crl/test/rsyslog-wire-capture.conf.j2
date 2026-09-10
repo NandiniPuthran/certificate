@@ -1,0 +1,29 @@
+# {{ ansible_managed }}
+# /etc/rsyslog.d/49-pipeline-wire-capture.conf   (on {{ wire_capture_host }})
+#
+# Captures the exact bytes Fluentd emits toward NESS. %rawmsg% is the whole
+# frame as received, PRI included and nothing normalised — which is the only
+# way to assert on <PRI> and field order honestly. Using %msg% here would
+# hand you rsyslog's reconstruction instead of Fluentd's output, and the test
+# would pass no matter what Fluentd sent.
+
+module(load="imtcp")
+
+template(name="pipelineRaw" type="string" string="%rawmsg%\n")
+
+input(type="imtcp"
+      port="{{ wire_capture_port }}"
+      address="127.0.0.1"
+      ruleset="pipelineWireCapture")
+
+ruleset(name="pipelineWireCapture") {
+    action(type="omfile"
+           file="{{ wire_capture_file }}"
+           template="pipelineRaw"
+           fileCreateMode="0640"
+           fileOwner="root"
+           fileGroup="adm"
+           flushOnTXEnd="on"
+           asyncWriting="off")
+    stop
+}

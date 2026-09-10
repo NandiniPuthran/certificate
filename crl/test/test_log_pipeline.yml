@@ -1,0 +1,25 @@
+---
+- name: Validate the Fluent Bit -> Fluentd -> NESS syslog pipeline
+  hosts: fluentbit_collectors
+  gather_facts: true
+  become: true
+  serial: "{{ probe_serial | default('20%') }}"
+  any_errors_fatal: false
+  roles:
+    - role: log_pipeline_test
+
+# Usage
+# -----
+#   Read-only sanity sweep, no traffic generated:
+#     ansible-playbook test_log_pipeline.yml --tags preflight
+#
+#   Full end-to-end on one canary before the fleet:
+#     ansible-playbook test_log_pipeline.yml --limit collector-01
+#
+#   Format-only re-check against the previous run's frames:
+#     ansible-playbook test_log_pipeline.yml --tags verify_format \
+#       -e probe_marker=PROBE-1757500000-123456789-collector_01
+#
+# serial defaults to 20% so a broken pipeline does not get 500 hosts' worth of
+# synthetic traffic pointed at it at once. any_errors_fatal is false on
+# purpose: you want the full failure map across the fleet, not the first host.

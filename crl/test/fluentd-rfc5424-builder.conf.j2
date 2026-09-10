@@ -1,0 +1,40 @@
+# {{ ansible_managed }}
+#
+# Builds the RFC 5424 frame. Place this AFTER the record_transformer that
+# normalises sd_* and BEFORE the <match> that copies to NESS.
+#
+#   SYSLOG-MSG = <PRI>1 SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP
+#                MSGID SP STRUCTURED-DATA [SP MSG]
+#
+# Every field is NILVALUE '-' when absent. Emitting an empty field instead of
+# '-' is the single most common way a "5424" frame fails a strict parser.
+
+<filter net.** probe.**>
+  @type record_transformer
+  enable_ruby true
+  <record>
+    rfc5424_line ${
+      pri    = (record["sd_pri"]    || 165).to_i
+      host   = (record["sd_host"]   || "-").to_s.gsub(/[^\x21-\x7e]/, "")[0,255]
+      app    = (record["sd_app"]    || "-").to_s.gsub(/[^\x21-\x7e]/, "")[0,48]
+      procid = (record["sd_procid"] || "-").to_s.gsub(/[^\x21-\x7e]/, "")[0,128]
+      msgid  = (record["sd_msgid"]  || "-").to_s.gsub(/[^\x21-\x7e]/, "")[0,32]
+      sd     = (record["sd_struct"] || "-").to_s
+      msg    = (record["message"]   || record["log"] || "").to_s
+      ts     = Time.at(time).utc.strftime("%Y-%m-%dT%H:%M:%S.%6NZ")
+      host   = "-" if host.empty?
+      app    = "-" if app.empty?
+      procid = "-" if procid.empty?
+      msgid  = "-" if msgid.empty?
+      sd     = "-" if sd.empty?
+      "<#{pri}>1 #{ts} #{host} #{app} #{procid} #{msgid} #{sd} #{msg}"
+    }
+  </record>
+</filter>
+
+# If NESS requires RFC 6587 octet counting on TCP, prepend the length instead
+# and set probe_expect_octet_counting: true in the test role. Do not enable
+# both framings — a length prefix on a newline-framed listener is silently
+# treated as part of the message.
+#
+#   rfc5424_line ${ line = "<#{pri}>1 ..." ; "#{line.bytesize} #{line}" }

@@ -1,0 +1,64 @@
+---
+# Everything here runs once, on the control node. The point is to answer one
+# question: does a usable CRL for this CA already exist? If it does, nothing
+# is regenerated, so repeat runs are a no-op instead of pushing a freshly
+# signed (and therefore different) file to every host each time.
+
+- name: Set artifact paths
+  ansible.builtin.set_fact:
+    _crlg_pem: "{{ crl_generate_artifact_dir }}/{{ crl_generate_name }}.crl.pem"
+    _crlg_der: "{{ crl_generate_artifact_dir }}/{{ crl_generate_name }}.crl.der"
+
+- name: Inspect the existing CRL artifact
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      crl="{{ _crlg_pem }}"
+      ca="{{ crl_generate_ca_cert }}"
+      min={{ crl_generate_renew_before_days | int }}
+
+      [ -f "$crl" ] || { echo "absent"; exit 0; }
+      [ -s "$crl" ] || { echo "empty"; exit 0; }
+      openssl crl -in "$crl" -noout >/dev/null 2>&1 || { echo "unparseable"; exit 0; }
+      openssl crl -in "$crl" -CAfile "$ca" -noout >/dev/null 2>&1 \
+        || { echo "signature-mismatch"; exit 0; }
+
+      crl_issuer=$(openssl crl  -in "$crl" -noout -issuer  -nameopt RFC2253 | sed 's/^issuer=//')
+      ca_subject=$(openssl x509 -in "$ca"  -noout -subject -nameopt RFC2253 | sed 's/^subject=//')
+      [ "$crl_issuer" = "$ca_subject" ] || { echo "issuer-mismatch"; exit 0; }
+
+      nu=$(openssl crl -in "$crl" -noout -nextupdate 2>/dev/null | cut -d= -f2- || true)
+      [ -n "$nu" ] || { echo "ok non-expiring"; exit 0; }
+      days=$(( ( $(date -u -d "$nu" +%s) - $(date -u +%s) ) / 86400 ))
+      if [ "$days" -lt "$min" ]; then echo "expiring $days"; else echo "ok $days"; fi
+    executable: /bin/bash
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: _crlg_state
+
+- name: Decide whether to generate
+  ansible.builtin.set_fact:
+    _crlg_verdict: "{{ _crlg_state.stdout | trim }}"
+    _crlg_needed: >-
+      {{ crl_generate_force | bool
+         or not (_crlg_state.stdout | trim).startswith('ok') }}
+
+- name: Report CRL state
+  ansible.builtin.debug:
+    msg: >-
+      {{ crl_generate_name }}: {{ _crlg_verdict }}
+      -> {{ 'generating' if _crlg_needed | bool else 'reusing existing CRL' }}
+  run_once: true
+
+- name: Fail early if check mode cannot produce the CRL it would distribute
+  ansible.builtin.fail:
+    msg: >-
+      No usable CRL exists ({{ _crlg_verdict }}) and check mode cannot create
+      one. Run once without --check to generate it, then check mode works.
+  when:
+    - _crlg_needed | bool
+    - ansible_check_mode | bool
+  run_once: true

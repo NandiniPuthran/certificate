@@ -1,0 +1,90 @@
+---
+# Read-only. Safe to run against production at any time.
+
+- name: Preflight | Gather service facts
+  ansible.builtin.service_facts:
+  tags: [preflight]
+
+- name: TC-01 | fluent-bit is running and enabled
+  ansible.builtin.assert:
+    that:
+      - "'fluent-bit.service' in ansible_facts.services"
+      - ansible_facts.services['fluent-bit.service'].state == 'running'
+      - ansible_facts.services['fluent-bit.service'].status == 'enabled'
+    fail_msg: "fluent-bit is not running+enabled on {{ inventory_hostname }}"
+    quiet: true
+  tags: [preflight]
+
+- name: TC-02 | Fluent Bit config parses cleanly (no restart)
+  ansible.builtin.command:
+    cmd: "{{ probe_fluentbit_bin }} --dry-run -c {{ probe_fluentbit_conf }}"
+  register: probe_fb_dryrun
+  changed_when: false
+  # Fluent Bit < 1.9 has no --dry-run; treat that as skipped, not failed.
+  failed_when:
+    - probe_fb_dryrun.rc != 0
+    - "'unknown' not in (probe_fb_dryrun.stderr | lower)"
+    - "'invalid option' not in (probe_fb_dryrun.stderr | lower)"
+  tags: [preflight]
+
+- name: TC-03a | TCP syslog listener is accepting connections
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ probe_syslog_tcp_port }}"
+    state: started
+    timeout: 5
+  changed_when: false
+  tags: [preflight]
+
+- name: TC-03b | UDP syslog socket is bound
+  # wait_for cannot probe UDP — there is nothing to connect to. Check the
+  # socket table instead.
+  ansible.builtin.command:
+    cmd: "ss -lunH sport = :{{ probe_syslog_udp_port }}"
+  register: probe_udp_sock
+  changed_when: false
+  failed_when: probe_udp_sock.stdout | trim | length == 0
+  tags: [preflight]
+
+- name: TC-04 | Fluent Bit can reach the Fluentd forward port
+  ansible.builtin.wait_for:
+    host: "{{ probe_fluentd_host }}"
+    port: "{{ probe_forward_port }}"
+    state: started
+    timeout: 5
+  changed_when: false
+  tags: [preflight]
+
+- name: Preflight | Stat the required taps on the Fluentd host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ fluentd_tap_file }}"
+    - "{{ wire_capture_file }}"
+  delegate_to: "{{ probe_fluentd_host }}"
+  run_once: true
+  register: probe_taps
+  changed_when: false
+  tags: [preflight]
+
+- name: Preflight | Both taps must exist before any probe is injected
+  ansible.builtin.assert:
+    that:
+      - probe_taps.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing tap file(s):
+      {{ probe_taps.results | rejectattr('stat.exists')
+         | map(attribute='item') | join(', ') }}.
+      Deploy these from your Fluentd role first — this test role deliberately
+      does not mutate Fluentd config.
+    quiet: true
+  run_once: true
+  tags: [preflight]
+
+- name: Preflight | Snapshot Fluent Bit metrics as the baseline
+  ansible.builtin.uri:
+    url: "{{ probe_fluentbit_metrics_url }}"
+    return_content: true
+  register: probe_fb_before
+  changed_when: false
+  tags: [preflight, inject]

@@ -1,0 +1,25 @@
+---
+# Runs from the `always:` block, so it fires even when an assertion failed.
+# Deliberately narrow: it removes this run's lines from the file we wrote to,
+# and nothing else.
+#
+# It does NOT truncate fluentd_tap_file or wire_capture_file. Both are held
+# open by Fluentd and rsyslog; truncating a file under an open write handle
+# leaves a sparse file and a wrong offset. Rotate those with logrotate
+# (copytruncate off, plus a postrotate reload) instead.
+
+- name: Cleanup | Remove this run's injected lines
+  ansible.builtin.lineinfile:
+    path: "{{ probe_tail_file }}"
+    regexp: "{{ probe_marker | regex_escape }}"
+    state: absent
+  when: probe_marker is defined
+  tags: [cleanup]
+
+- name: Cleanup | Note what was intentionally left in place
+  ansible.builtin.debug:
+    msg: >-
+      Probe lines for {{ probe_marker | default('this run') }} remain in
+      {{ fluentd_tap_file }}, {{ wire_capture_file }} and NESS by design —
+      they are the audit trail. Age them out with logrotate.
+  tags: [cleanup]
