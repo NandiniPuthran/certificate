@@ -37,6 +37,10 @@
     # its twin still in a Fluentd buffer. Size guard_minutes above your
     # worst-case buffer flush skew between the two instances.
     sample_lines: 5000
+
+    # Lines shown inline per failing check. The full set always goes to the file.
+    report_samples: 3
+    report_path: "/tmp/ness-conformance-{{ inventory_hostname }}.txt"
     window_minutes: 15
     guard_minutes: 5
 
@@ -217,122 +221,124 @@
       loop_control:
         label: "{{ item.key }}"
 
+    - name: Normalise TC-4 output into the same shape as the others
+      ansible.builtin.set_fact:
+        fail_tc4: "{{ _bad_groups.stdout_lines }}"
+
+    # Coverage. A check that found nothing to test passes vacuously — if the
+    # window held no BAPP traffic, TC-6 is green because it had no work to do.
+    # These counts are in the report header so a meaningless PASS is visible.
+    - name: Measure coverage
+      ansible.builtin.set_fact:
+        n_security: "{{ frames | select('search', 'nessLogType=\"SECURITY\"') | list | length }}"
+        n_bapp: "{{ frames | select('search', 'nessLogType=\"BAPP\"') | list | length }}"
+        n_bapp_app: "{{ frames | select('match', bapp_app_regex) | list | length }}"
+
+    # checks carries metadata only. The failing lines stay in their own facts
+    # and are looked up by name, so log lines are never round-tripped through
+    # a nested fact structure.
     - name: Assemble the check list
-      vars:
-        _src: "{{ src_regex }}"
       ansible.builtin.set_fact:
         checks:
-          - id: "TC-1"
-            desc: "RFC 5424 frame, strict RFC 3339 timestamp"
-            count: "{{ fail_tc1 | length }}"
-            srcs: "{{ fail_tc1 | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc1 | first | default(''))[:90] }}"
-            hint: "lowercase t/z, >6 fractional digits, or an unescaped ] in an SD value"
-          - id: "TC-2"
-            desc: "All {{ sd_required_keys | length }} SD fields present, non-empty"
-            count: "{{ fail_tc2 | length }}"
-            srcs: "{{ fail_tc2 | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc2 | first | default(''))[:90] }}"
-            hint: "missing per key: {{ sd_detail | default([]) | join(', ') }}"
-          - id: "TC-3a"
-            desc: "eventId is a valid UUID"
-            count: "{{ fail_tc3a | length }}"
-            srcs: "{{ fail_tc3a | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc3a | first | default(''))[:90] }}"
-            hint: "eventId absent, malformed, or holding a non-UUID value"
-          - id: "TC-3b"
-            desc: "Original uuid key removed after rename"
-            count: "{{ fail_tc3b | length }}"
-            srcs: "{{ fail_tc3b | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc3b | first | default(''))[:90] }}"
-            hint: "the transform added eventId instead of moving it - add remove_keys uuid"
-          - id: "TC-4"
-            desc: "Each log appears {{ expected_copies }}x under one eventId"
-            count: "{{ _bad_groups.stdout_lines | length }}"
-            srcs: ""
-            sample: "{{ (_bad_groups.stdout_lines | first | default(''))[:90] }}"
-            hint: "eventIds not seen exactly {{ expected_copies }} times (first 20 shown by the shell)"
-          - id: "TC-5"
-            desc: "SECURITY frames match a security pattern"
-            count: "{{ fail_tc5 | length }}"
-            srcs: "{{ fail_tc5 | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc5 | first | default(''))[:90] }}"
-            hint: "tagged SECURITY without matching: {{ security_alt }}"
-          - id: "TC-6a"
-            desc: "BAPP frames carry traceType=EVENT"
-            count: "{{ fail_tc6a | length }}"
-            srcs: "{{ fail_tc6a | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc6a | first | default(''))[:90] }}"
-            hint: "a standard BAPP log was tagged as a notification"
-          - id: "TC-6b"
-            desc: "BAPP frames come from a bapp_* app name"
-            count: "{{ fail_tc6b | length }}"
-            srcs: "{{ fail_tc6b | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc6b | first | default(''))[:90] }}"
-            hint: "BAPP tag applied to a non-BAPP source"
-          - id: "TC-6c"
-            desc: "Non-EVENT bapp_* logs are not leaking through"
-            count: "{{ fail_tc6c | length }}"
-            srcs: "{{ fail_tc6c | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc6c | first | default(''))[:90] }}"
-            hint: "these should have been dropped before reaching NESS"
-          - id: "TC-6d"
-            desc: "BAPP notifications are never tagged SECURITY"
-            count: "{{ fail_tc6d | length }}"
-            srcs: "{{ fail_tc6d | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
-            sample: "{{ (fail_tc6d | first | default(''))[:90] }}"
-            hint: "the SECURITY matcher is running ahead of the BAPP rule"
+          - { id: "TC-1",  var: "fail_tc1",  desc: "RFC 5424 frame and timestamp",
+              cause: "lowercase t/z, over 6 fractional digits, or an unescaped ] in an SD value" }
+          - { id: "TC-2",  var: "fail_tc2",  desc: "SD fields complete and non-empty",
+              cause: "missing per key: {{ sd_detail | default(['none']) | join(', ') }}" }
+          - { id: "TC-3a", var: "fail_tc3a", desc: "eventId is a valid UUID",
+              cause: "eventId absent, malformed, or holding a non-UUID value" }
+          - { id: "TC-3b", var: "fail_tc3b", desc: "Original uuid key removed after rename",
+              cause: "the transform added eventId instead of moving it - add remove_keys uuid" }
+          - { id: "TC-4",  var: "fail_tc4",  desc: "Each log mirrored across both instances",
+              cause: "eventIds not seen exactly {{ expected_copies }} times (count then eventId)" }
+          - { id: "TC-5",  var: "fail_tc5",  desc: "SECURITY frames match a security pattern",
+              cause: "tagged SECURITY but matches none of: {{ security_alt }}" }
+          - { id: "TC-6a", var: "fail_tc6a", desc: "BAPP frames carry traceType=EVENT",
+              cause: "a standard BAPP log was tagged as a notification" }
+          - { id: "TC-6b", var: "fail_tc6b", desc: "BAPP frames come from a bapp_* app",
+              cause: "BAPP tag applied to a non-BAPP source" }
+          - { id: "TC-6c", var: "fail_tc6c", desc: "Non-EVENT bapp_* logs are not leaking",
+              cause: "these should have been dropped before reaching NESS" }
+          - { id: "TC-6d", var: "fail_tc6d", desc: "BAPP notifications never tagged SECURITY",
+              cause: "the SECURITY matcher is running ahead of the BAPP rule" }
 
-    - name: Build the report rows
+    - name: Identify which checks failed
       ansible.builtin.set_fact:
-        report_rows: >-
-          {{ (report_rows | default([]))
-             + ['  ' ~ '%-7s' | format(item.id) ~ '%-48s' | format(item.desc)
-                ~ ('PASS' if item.count | int == 0 else 'FAIL  ' ~ item.count ~ ' lines')]
-             + ([] if item.count | int == 0 else
-                ['           ' ~ item.hint]
-                + (['           from: ' ~ item.srcs[:60]] if item.srcs | length > 0 else [])
-                + (['           e.g.  ' ~ item.sample] if item.sample | length > 0 else [])) }}
+        failed_ids: >-
+          {{ (failed_ids | default([]))
+             + ([item.id] if (lookup('vars', item.var) | length) > 0 else []) }}
       loop: "{{ checks }}"
       loop_control:
         label: "{{ item.id }}"
 
-    - name: Compute the verdict
-      vars:
-        _total: "{{ _id_counts.stdout_lines[0] | int }}"
-        _distinct: "{{ _id_counts.stdout_lines[1] | int }}"
+    # Built as ONE multi-line string, not a list. A list renders as a quoted
+    # JSON array under the default stdout callback, which is unreadable.
+    # Set stdout_callback = yaml in ansible.cfg and this prints as plain text.
+    - name: Render the report
       ansible.builtin.set_fact:
-        failed_count: "{{ checks | map(attribute='count') | map('int') | reject('eq', 0) | list | length }}"
-        mirror_verdict: >-
-          {{ 'no eventIds found at all' if _distinct | int == 0
-             else ('correctly mirrored' if _total | int == (expected_copies | int) * (_distinct | int)
-             else ('every frame has a unique eventId - each instance is generating its own instead of preserving the input'
-                   if _total | int == _distinct | int
-                   else 'partial - some pairs split, or one instance is not delivering')) }}
+        report: |
+          NESS syslog conformance   {{ inventory_hostname }}
+          window    {{ window_from }}Z .. {{ window_to }}Z
+          frames    {{ frames | length }}
+          coverage  SECURITY {{ n_security }}   BAPP {{ n_bapp }}   bapp_* apps {{ n_bapp_app }}
+
+          {% for c in checks %}
+          {% set bad = lookup('vars', c.var) %}
+          {{ 'FAIL' if bad | length > 0 else 'PASS' }}  {{ '%-6s' | format(c.id) }}{{ '%-42s' | format(c.desc) }}{{ (bad | length ~ ' lines') if bad | length > 0 else '' }}
+          {% endfor %}
+
+          RESULT    {{ 'FAIL' if failed_ids | default([]) | length > 0 else 'PASS' }}   {{ (checks | length) - (failed_ids | default([]) | length) }}/{{ checks | length }} checks passed
+          eventIds  {{ _id_counts.stdout_lines[0] }} total, {{ _id_counts.stdout_lines[1] }} distinct  ->  {{ mirror_verdict }}
+          notices   {{ _non_utc.stdout | trim }} non-UTC timestamps, {{ _no_pri.stdout | trim }} non-PRI lines from a foreign host
+          {% for c in checks %}
+          {% set bad = lookup('vars', c.var) %}
+          {% if bad | length > 0 %}
+          {% set srcs = bad[:1000] | map('regex_search', src_regex, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | list %}
+
+          ----------------------------------------------------------------------
+          {{ c.id }}  {{ c.desc }}   -   {{ bad | length }} lines
+
+            cause    {{ c.cause }}
+          {% if srcs | length > 0 %}
+            sources  {% for s in srcs | unique %}{{ s }} ({{ srcs.count(s) }}){{ ', ' if not loop.last else '' }}{% endfor %}
+
+          {% endif %}
+          {% for line in bad[:report_samples] %}
+            {{ line }}
+          {% endfor %}
+          {% if bad | length > report_samples %}
+            ... {{ bad | length - report_samples }} more, see {{ report_path }}
+          {% endif %}
+          {% endif %}
+          {% endfor %}
 
     - name: Test result
       ansible.builtin.debug:
-        msg: >-
-          {{ ['',
-              '=' * 74,
-              '  NESS syslog conformance  -  ' ~ (frames | length) ~ ' frames on ' ~ inventory_hostname,
-              '  window ' ~ window_from ~ 'Z  to  ' ~ window_to ~ 'Z',
-              '=' * 74]
-             + report_rows
-             + ['-' * 74,
-                '  RESULT: ' ~ ('PASS' if failed_count | int == 0 else 'FAIL')
-                  ~ '   ' ~ ((checks | length) - (failed_count | int)) ~ '/'
-                  ~ (checks | length) ~ ' checks passed',
-                '-' * 74,
-                '  eventIds: ' ~ _id_counts.stdout_lines[0] ~ ' total, '
-                  ~ _id_counts.stdout_lines[1] ~ ' distinct  ->  ' ~ mirror_verdict,
-                '  non-UTC timestamps in window: ' ~ (_non_utc.stdout | trim),
-                '  non-PRI lines from a foreign host: ' ~ (_no_pri.stdout | trim),
-                ''] }}
+        msg: "{{ report }}"
+
+    # Full, untruncated failing lines — for grepping, or attaching to a ticket.
+    - name: Write the full report to the controller
+      ansible.builtin.copy:
+        dest: "{{ report_path }}"
+        mode: "0644"
+        content: |
+          {{ report }}
+          {% for c in checks %}
+          {% set bad = lookup('vars', c.var) %}
+          {% if bad | length > 0 %}
+
+          ===== {{ c.id }}  all {{ bad | length }} failing lines =====
+          {% for line in bad %}
+          {{ line }}
+          {% endfor %}
+          {% endif %}
+          {% endfor %}
+      delegate_to: localhost
+      become: false
+      changed_when: false
 
     - name: Gate | Every check passed
       ansible.builtin.assert:
         that:
-          - failed_count | int == 0
-        fail_msg: "{{ failed_count }} of {{ checks | length }} checks failed - see the table above."
+          - failed_ids | default([]) | length == 0
+        fail_msg: "Failed: {{ failed_ids | default([]) | join(', ') }}. Full lines in {{ report_path }}"
         quiet: true
