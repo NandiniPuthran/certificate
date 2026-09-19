@@ -174,6 +174,7 @@
           echo "$T"; echo "$D"
       register: _id_counts
       changed_when: false
+      failed_when: false
 
     # ── Evaluate every check as a set operation ───────────────────────────
     # One task per check rather than a loop over every line: a loop would be
@@ -270,9 +271,22 @@
       loop_control:
         label: "{{ item.id }}"
 
-    # Built as ONE multi-line string, not a list. A list renders as a quoted
-    # JSON array under the default stdout callback, which is unreadable.
-    # Set stdout_callback = yaml in ansible.cfg and this prints as plain text.
+    - name: Compute the mirroring verdict
+      vars:
+        _counts: "{{ _id_counts.stdout_lines + ['0', '0'] }}"
+      ansible.builtin.set_fact:
+        mirror_verdict: >-
+          {{ 'no eventIds found at all' if _counts[1] | int == 0
+             else ('correctly mirrored'
+                   if _counts[0] | int == (expected_copies | int) * (_counts[1] | int)
+             else ('every frame has a unique eventId - each instance is generating its own
+                    instead of preserving the input'
+                   if _counts[0] | int == _counts[1] | int
+             else 'partial - some pairs split, or one instance is behind')) }}
+
+    # Built as one string for the file, then split into lines for the console.
+    # The default stdout callback prints a list one element per line, but
+    # renders a multi-line string as a single line full of literal \n.
     - name: Render the report
       ansible.builtin.set_fact:
         report: |
@@ -313,7 +327,7 @@
 
     - name: Test result
       ansible.builtin.debug:
-        msg: "{{ report }}"
+        msg: "{{ report.splitlines() }}"
 
     # Full, untruncated failing lines — for grepping, or attaching to a ticket.
     - name: Write the full report to the controller
