@@ -1,0 +1,338 @@
+---
+# test-ness-syslog.yml
+#
+# Passive conformance test. Reads a window of real traffic out of
+# /var/log/syslog on the NESS server and checks it. Nothing is injected,
+# nothing is written, no service is touched — safe to run any time, including
+# on a schedule.
+#
+#   ansible-playbook -i inventory.ini test-ness-syslog.yml
+#   ansible-playbook -i inventory.ini test-ness-syslog.yml -e window_minutes=60
+#
+# TC-1  every frame is RFC 5424 with a strict-profile RFC 3339 timestamp
+# TC-2  all required SD fields present and non-empty
+# TC-3  eventId is a valid UUID and the original uuid key is gone
+# TC-4  both Fluentd instances emit each log with the same eventId
+# TC-5  every SECURITY-tagged frame really matches a security pattern
+# TC-6  BAPP tagging is correct, standard BAPP logs are not leaking through,
+#       and no BAPP notification is tagged SECURITY
+#
+# Ends with one consolidated table and a single gate task.
+#
+# What passive testing cannot prove: that logs which SHOULD have been dropped
+# were dropped. Only that nothing wrong leaked through. Proving the drop side
+# needs injected probes with positive controls.
+
+- name: NESS syslog conformance
+  hosts: ness
+  gather_facts: true
+  become: true
+
+  vars:
+    syslog_path: /var/log/syslog
+
+    # Sample = the last N lines, narrowed to a time window.
+    # The guard band excludes the most recent traffic so a mirrored pair is
+    # never split by the edge of the sample — one copy inside the window and
+    # its twin still in a Fluentd buffer. Size guard_minutes above your
+    # worst-case buffer flush skew between the two instances.
+    sample_lines: 5000
+    window_minutes: 15
+    guard_minutes: 5
+
+    # Both Fluentd instances receive the same logs, so every source log
+    # should appear here exactly twice under one eventId.
+    expected_copies: 2
+
+    sd_required_keys:
+      - eventId
+      - notificationType
+      - eventLevel
+      - eventName
+      - nessLogType
+      - hostname
+      - siteType
+      - siteInstance
+
+    security_patterns:
+      - User Login
+      - Firewall Hit
+
+    # ── Grammar ───────────────────────────────────────────────────────────
+    # Plain YAML strings — backslashes inside a Jinja literal get mangled.
+    #
+    # TIMESTAMP is the RFC 5424 §6.2.3 profile, not bare RFC 3339: uppercase
+    # T and Z only, at most 6 fractional digits, -00:00 forbidden.
+    _ts: '(?:-|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|(?!-00:00)[+-](?:0[0-9]|1[0-4]):[0-5][0-9]))'
+    _pre: '^<(?:0|[1-9][0-9]{0,2})>[1-9][0-9]?[ ]'
+    _post: '[ ](?:-|[!-~]{1,255})[ ](?:-|[!-~]{1,48})[ ](?:-|[!-~]{1,128})[ ](?:-|[!-~]{1,32})'
+    # PARAM-VALUE must escape " \ and ] — this is what catches an eventName
+    # containing a bracket terminating its SD element early.
+    _sd: '[ ](?:-|(?:\[[!-~]{1,32}(?:[ ][!-~]{1,32}="(?:[^"\\\]]|\\["\\\]])*")*\])+)'
+    _msg: '(?:[ ][\s\S]*)?$'
+    rfc5424_regex: "{{ _pre ~ _ts ~ _post ~ _sd ~ _msg }}"
+
+    # Positional: HOSTNAME is field 3, APP-NAME field 4.
+    src_regex: '^<[0-9]{1,3}>[0-9]{1,2} [^ ]+ ([^ ]+) ([^ ]+) '
+    bapp_app_regex: '^<[0-9]{1,3}>[0-9]{1,2} [^ ]+ [^ ]+ bapp_[!-~]+ '
+    uuid_in_sd_regex: 'eventId="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"'
+    stale_uuid_regex: '[ ][uU][uU][iI][dD]="'
+    security_alt: "{{ security_patterns | join('|') }}"
+
+  tasks:
+
+    # ── Sample ────────────────────────────────────────────────────────────
+    - name: Fix the window bounds once so every read sees the same slice
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          date -u -d '-{{ window_minutes }} minutes' '+%Y-%m-%dT%H:%M:%S'
+          date -u -d '-{{ guard_minutes }} minutes' '+%Y-%m-%dT%H:%M:%S'
+      register: _bounds
+      changed_when: false
+
+    - name: Set the window
+      ansible.builtin.set_fact:
+        window_from: "{{ _bounds.stdout_lines[0] }}"
+        window_to: "{{ _bounds.stdout_lines[1] }}"
+        # Lines starting with < are what Fluentd sends. The NESS box's own
+        # cron/sshd/systemd logs are in this file too and are not RFC 5424 —
+        # they would fail every check, so they are excluded here rather than
+        # asserted on.
+        window_cmd: >-
+          tail -n {{ sample_lines }} '{{ syslog_path }}' | grep '^<' |
+          awk -v f='{{ _bounds.stdout_lines[0] }}' -v t='{{ _bounds.stdout_lines[1] }}'
+          'substr($2,1,19) >= f && substr($2,1,19) <= t'
+
+    - name: Read the window
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: "{{ window_cmd }}"
+      register: _sample
+      changed_when: false
+      failed_when: false
+
+    - name: Collect frames
+      ansible.builtin.set_fact:
+        frames: "{{ _sample.stdout_lines }}"
+
+    # Hard gate. Zero frames makes every check below fail for one root cause,
+    # and a table of six FAILs would tell you nothing.
+    - name: Gate | The window contains frames to test
+      ansible.builtin.assert:
+        that:
+          - frames | length > 0
+        fail_msg: >-
+          No RFC 5424 frames in {{ syslog_path }} between {{ window_from }}Z
+          and {{ window_to }}Z. Either Fluentd is not delivering, or the last
+          {{ sample_lines }} lines predate the window — raise sample_lines or
+          window_minutes and re-run.
+        quiet: true
+
+    # ── Diagnostics (reported, not asserted) ──────────────────────────────
+    - name: Count frames whose timestamp is not UTC
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: "{{ window_cmd }} | awk '$2 !~ /Z$/' | wc -l"
+      register: _non_utc
+      changed_when: false
+
+    # A frame that lost its PRI entirely is filtered out by the ^< grep rather
+    # than flagged. This counts non-PRI lines that did not come from the NESS
+    # box itself, which is what that failure would look like.
+    - name: Count non-PRI lines from a foreign host
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: >-
+          tail -n {{ sample_lines }} '{{ syslog_path }}' | grep -v '^<'
+          | grep -v ' {{ ansible_facts.hostname }} ' | wc -l
+      register: _no_pri
+      changed_when: false
+
+    # ── TC-4, done in awk because grouping thousands of lines in Jinja is
+    #    quadratic. Any eventId not appearing exactly twice is reported.
+    - name: TC-4 | Group frames by eventId
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: >-
+          {{ window_cmd }} | grep -o 'eventId="[^"]*"' | sort | uniq -c
+          | awk '$1 != {{ expected_copies }} {print $1" "$2}' | head -20
+      register: _bad_groups
+      changed_when: false
+
+    - name: TC-4 | Count total and distinct eventIds
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -uo pipefail
+          T=$({{ window_cmd }} | grep -c 'eventId="')
+          D=$({{ window_cmd }} | grep -o 'eventId="[^"]*"' | sort -u | wc -l)
+          echo "$T"; echo "$D"
+      register: _id_counts
+      changed_when: false
+
+    # ── Evaluate every check as a set operation ───────────────────────────
+    # One task per check rather than a loop over every line: a loop would be
+    # one Ansible task iteration per log line, which is unusable at this
+    # volume. These are vectorised, so the whole sample is one pass each.
+    - name: Find lines failing each required SD key
+      ansible.builtin.set_fact:
+        sd_failures: >-
+          {{ sd_failures | default({}) | combine({
+               item: frames | reject('search', item ~ '="[^"]+"') | list
+             }) }}
+      loop: "{{ sd_required_keys }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Evaluate all checks
+      ansible.builtin.set_fact:
+        fail_tc1: "{{ frames | reject('match', rfc5424_regex) | list }}"
+        fail_tc2: "{{ sd_failures.values() | flatten | unique | list }}"
+        fail_tc3a: "{{ frames | reject('search', uuid_in_sd_regex) | list }}"
+        fail_tc3b: "{{ frames | select('search', stale_uuid_regex) | list }}"
+        fail_tc5: >-
+          {{ frames | select('search', 'nessLogType="SECURITY"')
+             | reject('search', security_alt) | list }}
+        fail_tc6a: >-
+          {{ frames | select('search', 'nessLogType="BAPP"')
+             | reject('search', 'traceType="EVENT"') | list }}
+        fail_tc6b: >-
+          {{ frames | select('search', 'nessLogType="BAPP"')
+             | reject('match', bapp_app_regex) | list }}
+        fail_tc6c: >-
+          {{ frames | select('match', bapp_app_regex)
+             | reject('search', 'traceType="EVENT"') | list }}
+        fail_tc6d: >-
+          {{ frames | select('match', bapp_app_regex)
+             | select('search', 'nessLogType="SECURITY"') | list }}
+
+    - name: Summarise which SD keys are failing
+      ansible.builtin.set_fact:
+        sd_detail: >-
+          {{ (sd_detail | default([]))
+             + ([] if item.value | length == 0
+                else [item.key ~ ' (' ~ (item.value | length) ~ ')']) }}
+      loop: "{{ sd_failures | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Assemble the check list
+      vars:
+        _src: "{{ src_regex }}"
+      ansible.builtin.set_fact:
+        checks:
+          - id: "TC-1"
+            desc: "RFC 5424 frame, strict RFC 3339 timestamp"
+            count: "{{ fail_tc1 | length }}"
+            srcs: "{{ fail_tc1 | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc1 | first | default(''))[:90] }}"
+            hint: "lowercase t/z, >6 fractional digits, or an unescaped ] in an SD value"
+          - id: "TC-2"
+            desc: "All {{ sd_required_keys | length }} SD fields present, non-empty"
+            count: "{{ fail_tc2 | length }}"
+            srcs: "{{ fail_tc2 | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc2 | first | default(''))[:90] }}"
+            hint: "missing per key: {{ sd_detail | default([]) | join(', ') }}"
+          - id: "TC-3a"
+            desc: "eventId is a valid UUID"
+            count: "{{ fail_tc3a | length }}"
+            srcs: "{{ fail_tc3a | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc3a | first | default(''))[:90] }}"
+            hint: "eventId absent, malformed, or holding a non-UUID value"
+          - id: "TC-3b"
+            desc: "Original uuid key removed after rename"
+            count: "{{ fail_tc3b | length }}"
+            srcs: "{{ fail_tc3b | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc3b | first | default(''))[:90] }}"
+            hint: "the transform added eventId instead of moving it - add remove_keys uuid"
+          - id: "TC-4"
+            desc: "Each log appears {{ expected_copies }}x under one eventId"
+            count: "{{ _bad_groups.stdout_lines | length }}"
+            srcs: ""
+            sample: "{{ (_bad_groups.stdout_lines | first | default(''))[:90] }}"
+            hint: "eventIds not seen exactly {{ expected_copies }} times (first 20 shown by the shell)"
+          - id: "TC-5"
+            desc: "SECURITY frames match a security pattern"
+            count: "{{ fail_tc5 | length }}"
+            srcs: "{{ fail_tc5 | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc5 | first | default(''))[:90] }}"
+            hint: "tagged SECURITY without matching: {{ security_alt }}"
+          - id: "TC-6a"
+            desc: "BAPP frames carry traceType=EVENT"
+            count: "{{ fail_tc6a | length }}"
+            srcs: "{{ fail_tc6a | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc6a | first | default(''))[:90] }}"
+            hint: "a standard BAPP log was tagged as a notification"
+          - id: "TC-6b"
+            desc: "BAPP frames come from a bapp_* app name"
+            count: "{{ fail_tc6b | length }}"
+            srcs: "{{ fail_tc6b | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc6b | first | default(''))[:90] }}"
+            hint: "BAPP tag applied to a non-BAPP source"
+          - id: "TC-6c"
+            desc: "Non-EVENT bapp_* logs are not leaking through"
+            count: "{{ fail_tc6c | length }}"
+            srcs: "{{ fail_tc6c | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc6c | first | default(''))[:90] }}"
+            hint: "these should have been dropped before reaching NESS"
+          - id: "TC-6d"
+            desc: "BAPP notifications are never tagged SECURITY"
+            count: "{{ fail_tc6d | length }}"
+            srcs: "{{ fail_tc6d | map('regex_search', _src, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | unique | list | join(', ') }}"
+            sample: "{{ (fail_tc6d | first | default(''))[:90] }}"
+            hint: "the SECURITY matcher is running ahead of the BAPP rule"
+
+    - name: Build the report rows
+      ansible.builtin.set_fact:
+        report_rows: >-
+          {{ (report_rows | default([]))
+             + ['  ' ~ '%-7s' | format(item.id) ~ '%-48s' | format(item.desc)
+                ~ ('PASS' if item.count | int == 0 else 'FAIL  ' ~ item.count ~ ' lines')]
+             + ([] if item.count | int == 0 else
+                ['           ' ~ item.hint]
+                + (['           from: ' ~ item.srcs[:60]] if item.srcs | length > 0 else [])
+                + (['           e.g.  ' ~ item.sample] if item.sample | length > 0 else [])) }}
+      loop: "{{ checks }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Compute the verdict
+      vars:
+        _total: "{{ _id_counts.stdout_lines[0] | int }}"
+        _distinct: "{{ _id_counts.stdout_lines[1] | int }}"
+      ansible.builtin.set_fact:
+        failed_count: "{{ checks | map(attribute='count') | map('int') | reject('eq', 0) | list | length }}"
+        mirror_verdict: >-
+          {{ 'no eventIds found at all' if _distinct | int == 0
+             else ('correctly mirrored' if _total | int == (expected_copies | int) * (_distinct | int)
+             else ('every frame has a unique eventId - each instance is generating its own instead of preserving the input'
+                   if _total | int == _distinct | int
+                   else 'partial - some pairs split, or one instance is not delivering')) }}
+
+    - name: Test result
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['',
+              '=' * 74,
+              '  NESS syslog conformance  -  ' ~ (frames | length) ~ ' frames on ' ~ inventory_hostname,
+              '  window ' ~ window_from ~ 'Z  to  ' ~ window_to ~ 'Z',
+              '=' * 74]
+             + report_rows
+             + ['-' * 74,
+                '  RESULT: ' ~ ('PASS' if failed_count | int == 0 else 'FAIL')
+                  ~ '   ' ~ ((checks | length) - (failed_count | int)) ~ '/'
+                  ~ (checks | length) ~ ' checks passed',
+                '-' * 74,
+                '  eventIds: ' ~ _id_counts.stdout_lines[0] ~ ' total, '
+                  ~ _id_counts.stdout_lines[1] ~ ' distinct  ->  ' ~ mirror_verdict,
+                '  non-UTC timestamps in window: ' ~ (_non_utc.stdout | trim),
+                '  non-PRI lines from a foreign host: ' ~ (_no_pri.stdout | trim),
+                ''] }}
+
+    - name: Gate | Every check passed
+      ansible.builtin.assert:
+        that:
+          - failed_count | int == 0
+        fail_msg: "{{ failed_count }} of {{ checks | length }} checks failed - see the table above."
+        quiet: true
