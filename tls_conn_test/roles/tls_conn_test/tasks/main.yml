@@ -1,18 +1,84 @@
 ---
-- name: Build this host's test cases (case defaults merged in)
+- name: Reset case accumulators
   ansible.builtin.set_fact:
-    tls_test_my_cases: >-
-      {{ [tls_test_case_defaults]
-         | product(tls_test_cases | selectattr('source', 'equalto', inventory_hostname) | list)
-         | map('list') | map('combine') | list }}
+    _tls_targets: []
+    tls_test_all_cases: []
+  tags: always
+
+- name: Validate site targets reference known endpoints and test kinds
+  ansible.builtin.assert:
+    that:
+      - item.1.endpoint in tls_test_endpoints
+      - (item.1.tests | default([])) | difference(tls_test_kinds.keys() | list) | length == 0
+    fail_msg: "Site {{ item.0.key }}: unknown endpoint or test kind in {{ item.1 }}"
+    quiet: true
+  loop: "{{ tls_test_site_targets | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0.key }} -> {{ item.1.endpoint }}"
+  tags: always
+
+# Pass 1: one entry per (site, endpoint) with its resolved list of tests
+- name: Resolve per-site targets and their test profiles
+  ansible.builtin.set_fact:
+    _tls_targets: "{{ _tls_targets | default([]) + [_resolved] }}"
+  loop: "{{ tls_test_site_targets | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0.key }} -> {{ item.1.endpoint }}"
+  vars:
+    _ep: "{{ tls_test_case_defaults | combine(tls_test_endpoints[item.1.endpoint]) }}"
+    _resolved:
+      site: "{{ item.0.key }}"
+      endpoint: "{{ item.1.endpoint }}"
+      overrides: "{{ item.1 | dict2items | rejectattr('key', 'in', ['endpoint', 'tests']) | items2dict }}"
+      tests: "{{ item.1.tests | default(tls_test_profiles[_ep.mode]) }}"
+  tags: always
+
+# Pass 2: expand every (site, endpoint, test) into a full case.
+# Precedence (last wins): case defaults < endpoint < site override < test kind < computed fields
+- name: Expand targets into test cases (all sites, for the report)
+  ansible.builtin.set_fact:
+    tls_test_all_cases: "{{ tls_test_all_cases + [_case] }}"
+  loop: "{{ _tls_targets | subelements('tests') }}"
+  loop_control:
+    label: "{{ item.0.site }}-{{ item.0.endpoint }}-{{ item.1 }}"
+  vars:
+    _merged: >-
+      {{ tls_test_case_defaults
+         | combine(tls_test_endpoints[item.0.endpoint], item.0.overrides, tls_test_kinds[item.1]) }}
+    _skip_reason: >-
+      {{ ('source ' ~ item.0.site ~ ' not available') if item.0.site in tls_test_unavailable_sites else
+         ('destination ' ~ _merged.site ~ ' not available') if _merged.site in tls_test_unavailable_sites else
+         ('disabled' if not _merged.enabled | bool else '') }}
+    _case: >-
+      {{ _merged | combine({'id': item.0.site ~ '-' ~ item.0.endpoint ~ '-' ~ item.1,
+                            'source': item.0.site,
+                            'endpoint': item.0.endpoint,
+                            'kind': item.1,
+                            'enabled': _skip_reason == '',
+                            'skip_reason': _skip_reason}) }}
+  tags: always
+
+- name: Add one-off extra cases and select this site's cases
+  ansible.builtin.set_fact:
+    tls_test_all_cases: "{{ _all }}"
+    tls_test_my_cases: "{{ _all | selectattr('source', 'equalto', tls_test_site) | list }}"
     tls_test_results: []
+  vars:
+    _all: >-
+      {{ (tls_test_all_cases | default([]))
+         + ([tls_test_case_defaults] | product(tls_test_extra_cases) | map('list') | map('combine') | list) }}
+  tags: always
+
+- name: Show what this host will test
+  ansible.builtin.debug:
+    msg: "{{ tls_test_site }}: {{ tls_test_my_cases | length }} case(s) -> {{ tls_test_my_cases | map(attribute='id') | list }}"
   tags: always
 
 - name: Validate test case IDs are unique
   ansible.builtin.assert:
     that:
-      - (tls_test_cases | map(attribute='id') | unique | list | length) == (tls_test_cases | length)
-    fail_msg: "Duplicate id in tls_test_cases"
+      - (tls_test_all_cases | map(attribute='id') | unique | list | length) == (tls_test_all_cases | length)
+    fail_msg: "Duplicate case id (check tls_test_site_targets / tls_test_extra_cases)"
     quiet: true
   run_once: true
   tags: always
@@ -49,8 +115,15 @@
       ansible.builtin.include_tasks:
         file: preflight.yml
         apply:
-          tags: [preflight, tls, mtls, negative]
-      tags: [preflight, tls, mtls, negative]
+          tags: [preflight, tls, mtls, negative, discover]
+      tags: [preflight, tls, mtls, negative, discover]
+
+    - name: Phase | discover (which endpoints speak HTTP) - run with --tags discover
+      ansible.builtin.include_tasks:
+        file: discover.yml
+        apply:
+          tags: [discover]
+      tags: [never, discover]
 
     - name: Phase | generate throwaway self-signed certificate
       ansible.builtin.include_tasks:

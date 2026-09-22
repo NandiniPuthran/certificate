@@ -1,8 +1,20 @@
 ---
+# One host per AVAILABLE source site. `site_name` must match a key in
+# tls_test_site_targets. Unavailable sites (tls_test_unavailable_sites) are
+# not in the inventory; their cases still appear in the report as SKIPPED.
 all:
   children:
     tls_test_sources:
       hosts:
-        site1:
+        site1-host:
           ansible_host: 10.0.1.10
-        # add site2..site4 when they come online and have rows with source: siteN
+          site_name: site1
+        site2-host:
+          ansible_host: 10.0.2.10
+          site_name: site2
+        site3-host:
+          ansible_host: 10.0.3.10
+          site_name: site3
+        # site4-host:            # add when site4 comes online, and remove
+        #   ansible_host: ...    # site4 from tls_test_unavailable_sites
+        #   site_name: site4

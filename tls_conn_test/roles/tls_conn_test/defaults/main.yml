@@ -1,8 +1,148 @@
 ---
-# ---------------------------------------------------------------------------
-# Client-side trust material on each source host (override per host/group).
+# ===========================================================================
+# 0. WHICH SITE AM I?
+#    Inventory hostnames that aren't site1..siteN: set `site_name: siteN`
+#    in host_vars / group_vars.
+# ===========================================================================
+tls_test_site: "{{ site_name | default(inventory_hostname) }}"
+
+# Sites not available yet. Every test FROM or TO these sites is reported as
+# SKIPPED. Remove a site from this list when it comes online.
+tls_test_unavailable_sites: [site4, site5, site6]
+
+# ===========================================================================
+# 1. ENDPOINT CATALOG - every destination host:port defined ONCE.
+#    site:       site that owns the endpoint (drives availability); '' = none
+#    mode:       mtls | tls  (a property of the server, not the caller)
+#    http_check: true once `--tags discover` shows the endpoint returns 200
+# ===========================================================================
+tls_test_endpoints:
+  # --- site1: all mTLS ---
+  site1_webui_443:
+    target: webui.site1.example
+    port: 443
+    site: site1
+    mode: mtls
+  site1_api_4440:
+    target: api.site1.example
+    port: 4440
+    site: site1
+    mode: mtls
+  site1_keepalived_4430:
+    target: keepalived.site1.example
+    port: 4430
+    site: site1
+    mode: mtls
+
+  # --- APIs called from site1: mTLS ---
+  api_5430:
+    target: api.example
+    port: 5430
+    site: ""
+    mode: mtls
+  site2_api_5430:
+    target: api.site2.example
+    port: 5430
+    site: site2
+    mode: mtls
+  site3_api_5430:
+    target: api.site3.example
+    port: 5430
+    site: site3
+    mode: mtls
+
+  # --- everything else: TLS ---
+  site2_webui_4210:
+    target: webui.site2.example
+    port: 4210
+    site: site2
+    mode: tls
+  site3_webui_4102:
+    target: webui.site3.example
+    port: 4102
+    site: site3
+    mode: tls
+  site2_api_51410:
+    target: api.site2.example
+    port: 51410
+    site: site2
+    mode: tls
+
+# ===========================================================================
+# 2. PER-SITE TARGETS - one key per source site (rows of the matrix).
+#    `tests: [valid]` = positive check only. Negative tests check the SERVER's
+#    config, so they run from one source per endpoint, not from every source.
+# ===========================================================================
+tls_test_site_targets:
+  site1:
+    - endpoint: api_5430
+    - endpoint: site2_api_5430
+    - endpoint: site3_api_5430
+  site2:
+    - endpoint: site1_keepalived_4430      # full negative set runs from here
+    - endpoint: site2_webui_4210
+  site3:
+    - endpoint: site1_keepalived_4430
+      tests: [valid]
+    - endpoint: site3_webui_4102
+  site4:
+    - endpoint: site1_keepalived_4430
+      tests: [valid]
+  site5:
+    - endpoint: site1_webui_443
+    - endpoint: site2_webui_4210
+      tests: [valid]                       # negatives already run from site2
+  site6:
+    - endpoint: site1_api_4440
+    - endpoint: site2_api_51410
+
+# ===========================================================================
+# 3. TEST PROFILES - tests each endpoint mode gets automatically
+# ===========================================================================
+tls_test_profiles:
+  mtls: [valid, selfsigned_client, no_client_cert, untrusted_server]
+  tls: [valid, untrusted_server]
+
+#   client_cert: valid | selfsigned | none     (ignored when mode: tls)
+#   trust:       ca | selfsigned               (CA used to verify the SERVER)
+#   expect:      success | server_reject | client_verify_fail
+tls_test_kinds:
+  valid:
+    client_cert: valid
+    trust: ca
+    expect: success
+  selfsigned_client:
+    client_cert: selfsigned
+    trust: ca
+    expect: server_reject
+  no_client_cert:
+    client_cert: none
+    trust: ca
+    expect: server_reject
+  untrusted_server:
+    client_cert: valid
+    trust: selfsigned
+    expect: client_verify_fail
+
+# Optional one-off cases (full case dicts incl. id and source)
+tls_test_extra_cases: []
+
+# Base values every case starts from
+tls_test_case_defaults:
+  mode: mtls
+  client_cert: valid
+  trust: ca
+  expect: success
+  site: ""
+  http_check: false          # handshake-only until discovery proves HTTP
+  http_path: /health
+  extra_args: ""
+  enabled: true
+
+# ===========================================================================
+# CLIENT TRUST MATERIAL (per source host - override in host_vars if needed)
 # Private key is usually root-only, so run the play with become: true.
-# ---------------------------------------------------------------------------
+# ===========================================================================
 tls_test_ca_file: /etc/ipa/ca.crt
 tls_test_client_cert: "/etc/ssl/certs/{{ inventory_hostname }}.crt"
 tls_test_client_key: "/etc/ssl/private/{{ inventory_hostname }}.key"
@@ -11,82 +151,25 @@ tls_test_client_key: "/etc/ssl/private/{{ inventory_hostname }}.key"
 # so the ONLY difference in the negative test is the issuer.
 tls_test_selfsigned_cn: "{{ inventory_hostname }}"
 
-# Timeouts (seconds)
+# ===========================================================================
+# BEHAVIOUR
+# ===========================================================================
 tls_test_tcp_timeout: 5
 tls_test_timeout: 10
 
-# HTTP check used to prove the server actually accepted the client
+# Handshake-only checks keep the connection open this long so a TLS 1.3
+# post-handshake rejection alert is received before the client hangs up.
+tls_test_hold_seconds: 2
+
 tls_test_expected_http_status: 200
 
 # How a server rejection may show up:
-#  - TLS alert (TLS 1.2 during handshake, TLS 1.3 on first read)
+#  - TLS alert (TLS 1.2 during handshake, TLS 1.3 after it)
 #  - HTTP status (e.g. nginx completes the handshake then returns 400)
 tls_test_reject_alert_regex: "alert (unknown ca|bad certificate|certificate unknown|certificate required|unsupported certificate)"
 tls_test_reject_http_codes: [400, 403]
 
-# Consolidated report written on the Ansible controller
+# Signs the server dropped the connection instead of completing it cleanly
+tls_test_conn_error_regex: "unexpected eof|reset by peer|errno="
+
 tls_test_report_dir: "{{ playbook_dir }}/reports"
-
-# ---------------------------------------------------------------------------
-# Per-case defaults (merged under each case)
-#   mode:        tls | mtls
-#   client_cert: valid | selfsigned | none     (ignored when mode: tls)
-#   trust:       ca | selfsigned               (CA used to verify the SERVER)
-#   expect:      success | server_reject | client_verify_fail
-#   enabled:     false = site not available yet -> reported as SKIPPED
-# ---------------------------------------------------------------------------
-tls_test_case_defaults:
-  mode: mtls
-  client_cert: valid
-  trust: ca
-  expect: success
-  http_check: true
-  http_path: /health
-  extra_args: ""
-  enabled: true
-
-# ---------------------------------------------------------------------------
-# Test matrix. `source` must match the inventory_hostname of the host that
-# runs the check. Hostnames/ports/paths below are placeholders.
-# ---------------------------------------------------------------------------
-tls_test_cases:
-  # --- site1 -> site2 API (mTLS) ---
-  - id: s1-s2-mtls-valid
-    source: site1
-    target: site2.example.internal
-    port: 8443
-
-  - id: s1-s2-mtls-selfsigned-client
-    source: site1
-    target: site2.example.internal
-    port: 8443
-    client_cert: selfsigned
-    expect: server_reject
-
-  - id: s1-s2-mtls-no-client-cert
-    source: site1
-    target: site2.example.internal
-    port: 8443
-    client_cert: none
-    expect: server_reject
-
-  - id: s1-s2-untrusted-server-ca
-    source: site1
-    target: site2.example.internal
-    port: 8443
-    trust: selfsigned
-    expect: client_verify_fail
-
-  # --- pending sites: defined now, enabled later ---
-  - id: s1-s3-tls-valid
-    source: site1
-    target: site3.example.internal
-    port: 443
-    mode: tls
-    enabled: false
-
-  - id: s1-s4-mtls-valid
-    source: site1
-    target: site4.example.internal
-    port: 8443
-    enabled: false

@@ -10,6 +10,8 @@
     set -o pipefail
     {% if tls_case.http_check | bool %}
     printf 'GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' {{ tls_case.http_path | quote }} {{ tls_case.target | quote }} |
+    {% else %}
+    sleep {{ tls_test_hold_seconds }} |
     {% endif %}
     timeout {{ tls_test_timeout }} openssl s_client \
       -connect {{ (tls_case.target ~ ':' ~ tls_case.port) | quote }} \
@@ -23,11 +25,7 @@
       -cert {{ (tls_test_tmpdir.path ~ '/selfsigned.crt') | quote }} -key {{ (tls_test_tmpdir.path ~ '/selfsigned.key') | quote }} \
     {% endif %}
       {{ tls_case.extra_args }} \
-    {% if tls_case.http_check | bool %}
-      -ign_eof 2>&1
-    {% else %}
-      </dev/null 2>&1
-    {% endif %}
+      {{ '-ign_eof' if tls_case.http_check | bool else '' }} 2>&1
   args:
     executable: /bin/bash
   register: _tls_probe
@@ -38,9 +36,11 @@
     - _tls_reach in ['ok', 'unchecked']
 
 # Pass rules:
-#   success            client verified server, no reject alert, HTTP status matches
-#                      (TLS 1.3 can print "Verify return code: 0 (ok)" and THEN get
-#                      rejected by the server, which is why the HTTP check matters)
+#   success            client verified server, no reject alert, and either the HTTP
+#                      status matches (http_check) or the connection stayed up for
+#                      tls_test_hold_seconds without being dropped (handshake-only).
+#                      TLS 1.3 can print "Verify return code: 0 (ok)" and THEN get
+#                      rejected, which is why a bare handshake is not enough.
 #   server_reject      client did NOT fail verification (so the refusal came from the
 #                      server), and a reject alert or reject HTTP code was seen
 #   client_verify_fail client-side verify error, no HTTP response
@@ -54,10 +54,12 @@
     _verify_line: "{{ _out | regex_search('Verify return code: [0-9]+ [(][^)]*[)]') | default('', true) }}"
     _alert: "{{ _out | regex_search(tls_test_reject_alert_regex, ignorecase=True) | default('', true) }}"
     _http: "{{ (_out | regex_search('HTTP/[0-9.]+ [0-9]{3}') | default('none 000', true)).split() | last }}"
+    _conn_err: "{{ _out | regex_search(tls_test_conn_error_regex, ignorecase=True) | default('', true) }}"
     _want_http: "{{ tls_test_expected_http_status | string }}"
     _reject_http: "{{ tls_test_reject_http_codes | map('string') | list }}"
     _passed: >-
-      {{ (_verify_ok | bool and _alert == '' and (not tls_case.http_check | bool or _http == _want_http))
+      {{ (_verify_ok | bool and _alert == '' and
+          ((_http == _want_http) if tls_case.http_check | bool else (_conn_err == '')))
          if tls_case.expect == 'success' else
          ((not _verify_err | bool) and _http != _want_http and (_alert != '' or _http in _reject_http))
          if tls_case.expect == 'server_reject' else
@@ -67,14 +69,15 @@
          ('UNREACHABLE' if _tls_reach not in ['ok', 'unchecked'] else
          ('PASS' if _passed | bool else 'FAIL')) }}
     _detail: >-
-      {%- if not tls_case.enabled | bool -%}site not available yet
+      {%- if not tls_case.enabled | bool -%}{{ tls_case.skip_reason | default('disabled') }}
       {%- elif _tls_reach == 'dns' -%}DNS resolution failed for {{ tls_case.target }}
       {%- elif _tls_reach == 'tcp' -%}TCP connect failed to {{ tls_case.target }}:{{ tls_case.port }}
-      {%- else -%}expect={{ tls_case.expect }} | {{ _verify_line or 'no verify result' }} | http={{ _http }}{{ (' | ' ~ _alert) if _alert else '' }} | rc={{ _tls_probe.rc | default('-') }}
+      {%- else -%}expect={{ tls_case.expect }} | {{ _verify_line or 'no verify result' }} | http={{ _http if tls_case.http_check | bool else 'n/a' }}{{ (' | ' ~ _alert) if _alert else '' }}{{ (' | ' ~ _conn_err) if _conn_err else '' }} | rc={{ _tls_probe.rc | default('-') }}
       {%- endif -%}
     _result:
       id: "{{ tls_case.id }}"
-      source: "{{ inventory_hostname }}"
+      source: "{{ tls_test_site }}"
+      host: "{{ inventory_hostname }}"
       target: "{{ tls_case.target }}:{{ tls_case.port }}"
       mode: "{{ tls_case.mode }}"
       expect: "{{ tls_case.expect }}"

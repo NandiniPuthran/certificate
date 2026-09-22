@@ -15,7 +15,7 @@
   become: false
   run_once: true
 
-# Covers the FULL matrix, including rows whose source host wasn't in this run.
+# Covers the FULL matrix for every site, including sites not in this run.
 # No timestamp in the content, so the task only reports "changed" when results change.
 - name: Report | Write consolidated report on controller
   ansible.builtin.copy:
@@ -23,9 +23,10 @@
     mode: "0644"
     content: |
       {{ '%-12s %-30s %-8s %-32s %s' | format('STATUS', 'CASE', 'SOURCE', 'TARGET', 'DETAIL') }}
-      {% for c in tls_test_cases %}
-      {% set res = hostvars[c.source].tls_test_results | default([]) | selectattr('id', 'equalto', c.id) | list if c.source in hostvars else [] %}
-      {% set r = res[0] if res else {'status': 'NOT RUN', 'detail': 'source host not in this run, or phase not selected'} %}
+      {% set all_results = ansible_play_hosts_all | map('extract', hostvars) | map(attribute='tls_test_results', default=[]) | flatten(levels=1) %}
+      {% for c in tls_test_all_cases %}
+      {% set res = all_results | selectattr('id', 'equalto', c.id) | list %}
+      {% set r = res[0] if res else ({'status': 'SKIPPED', 'detail': c.skip_reason} if not c.enabled else {'status': 'NOT RUN', 'detail': 'source site not in this run, or phase not selected'}) %}
       {{ '%-12s %-30s %-8s %-32s %s' | format(r.status, c.id, c.source, c.target ~ ':' ~ c.port, r.detail) }}
       {% endfor %}
   delegate_to: localhost
