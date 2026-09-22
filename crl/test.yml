@@ -366,18 +366,19 @@
         _real_logs: "{{ all_lines | reject('search', 'marker=' ~ run_id) | list }}"
         # Extract eventIds and count copies of each
         _id_list: "{{ _real_logs | map('regex_findall', 'eventId=\"([^\"]+)\"') | flatten }}"
-        _id_unique: "{{ _id_list | unique | list | length }}"
+        _id_unique: "{{ (_id_list | unique | list | length) | int }}"
+        _total: "{{ (_real_logs | length) | int }}"
+        _expected: "{{ (groups['fluentd'] | length) | int }}"
+        _ratio: "{{ ((_total | float) / (_id_unique | float + 0.0001)) | round(2) }}"
       ansible.builtin.set_fact:
         tc4_bad: >-
           {{ tc4_bad | default([])
              + (['No real logs in sample to verify mirroring (inconclusive)']
-                if (_real_logs | length) == 0 else [])
-             + (['Real logs not mirrored: ' ~ (_real_logs | length) ~ ' total copies, '
+                if _total == 0 else [])
+             + (['Real logs not mirrored: ' ~ _total ~ ' total copies, '
                  ~ _id_unique ~ ' unique eventIds (ratio: ' 
-                 ~ ((_real_logs | length) | float / (_id_unique or 1)) | round(2) ~ ':1, expected 2:1)']
-                if (_real_logs | length) > 0 
-                   and (_real_logs | length) != (_id_unique * (groups['fluentd'] | length))
-                else []) }}
+                 ~ _ratio ~ ':1, expected ' ~ _expected ~ ':1)']
+                if _total > 0 and _total != (_id_unique * _expected) else []) }}
 
     - name: TC-5 | Firewall and login lines tagged SECURITY, unmatched line dropped
       vars:
