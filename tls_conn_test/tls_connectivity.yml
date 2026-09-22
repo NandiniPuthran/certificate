@@ -1,0 +1,7 @@
+---
+- name: Cross-site TLS / mTLS connectivity tests
+  hosts: tls_test_sources
+  gather_facts: false
+  become: true  # client private key is typically root-only
+  roles:
+    - tls_conn_test

@@ -1,0 +1,92 @@
+---
+# ---------------------------------------------------------------------------
+# Client-side trust material on each source host (override per host/group).
+# Private key is usually root-only, so run the play with become: true.
+# ---------------------------------------------------------------------------
+tls_test_ca_file: /etc/ipa/ca.crt
+tls_test_client_cert: "/etc/ssl/certs/{{ inventory_hostname }}.crt"
+tls_test_client_key: "/etc/ssl/private/{{ inventory_hostname }}.key"
+
+# Throwaway self-signed cert uses the same CN/SAN as the real client cert,
+# so the ONLY difference in the negative test is the issuer.
+tls_test_selfsigned_cn: "{{ inventory_hostname }}"
+
+# Timeouts (seconds)
+tls_test_tcp_timeout: 5
+tls_test_timeout: 10
+
+# HTTP check used to prove the server actually accepted the client
+tls_test_expected_http_status: 200
+
+# How a server rejection may show up:
+#  - TLS alert (TLS 1.2 during handshake, TLS 1.3 on first read)
+#  - HTTP status (e.g. nginx completes the handshake then returns 400)
+tls_test_reject_alert_regex: "alert (unknown ca|bad certificate|certificate unknown|certificate required|unsupported certificate)"
+tls_test_reject_http_codes: [400, 403]
+
+# Consolidated report written on the Ansible controller
+tls_test_report_dir: "{{ playbook_dir }}/reports"
+
+# ---------------------------------------------------------------------------
+# Per-case defaults (merged under each case)
+#   mode:        tls | mtls
+#   client_cert: valid | selfsigned | none     (ignored when mode: tls)
+#   trust:       ca | selfsigned               (CA used to verify the SERVER)
+#   expect:      success | server_reject | client_verify_fail
+#   enabled:     false = site not available yet -> reported as SKIPPED
+# ---------------------------------------------------------------------------
+tls_test_case_defaults:
+  mode: mtls
+  client_cert: valid
+  trust: ca
+  expect: success
+  http_check: true
+  http_path: /health
+  extra_args: ""
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# Test matrix. `source` must match the inventory_hostname of the host that
+# runs the check. Hostnames/ports/paths below are placeholders.
+# ---------------------------------------------------------------------------
+tls_test_cases:
+  # --- site1 -> site2 API (mTLS) ---
+  - id: s1-s2-mtls-valid
+    source: site1
+    target: site2.example.internal
+    port: 8443
+
+  - id: s1-s2-mtls-selfsigned-client
+    source: site1
+    target: site2.example.internal
+    port: 8443
+    client_cert: selfsigned
+    expect: server_reject
+
+  - id: s1-s2-mtls-no-client-cert
+    source: site1
+    target: site2.example.internal
+    port: 8443
+    client_cert: none
+    expect: server_reject
+
+  - id: s1-s2-untrusted-server-ca
+    source: site1
+    target: site2.example.internal
+    port: 8443
+    trust: selfsigned
+    expect: client_verify_fail
+
+  # --- pending sites: defined now, enabled later ---
+  - id: s1-s3-tls-valid
+    source: site1
+    target: site3.example.internal
+    port: 443
+    mode: tls
+    enabled: false
+
+  - id: s1-s4-mtls-valid
+    source: site1
+    target: site4.example.internal
+    port: 8443
+    enabled: false

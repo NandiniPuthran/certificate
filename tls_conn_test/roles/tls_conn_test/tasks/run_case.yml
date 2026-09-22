@@ -1,0 +1,82 @@
+---
+# One test case. Loop var: tls_case (already merged with tls_test_case_defaults)
+
+- name: "{{ tls_case.id }} | Look up preflight result"
+  ansible.builtin.set_fact:
+    _tls_reach: "{{ (tls_test_reachability | default({}))[tls_case.id] | default('unchecked') }}"
+
+- name: "{{ tls_case.id }} | Probe with openssl s_client"
+  ansible.builtin.shell: |
+    set -o pipefail
+    {% if tls_case.http_check | bool %}
+    printf 'GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' {{ tls_case.http_path | quote }} {{ tls_case.target | quote }} |
+    {% endif %}
+    timeout {{ tls_test_timeout }} openssl s_client \
+      -connect {{ (tls_case.target ~ ':' ~ tls_case.port) | quote }} \
+      -servername {{ tls_case.target | quote }} \
+      -verify_hostname {{ tls_case.target | quote }} \
+      -verify_return_error \
+      -CAfile {{ (tls_test_ca_file if tls_case.trust == 'ca' else tls_test_tmpdir.path ~ '/selfsigned.crt') | quote }} \
+    {% if tls_case.mode == 'mtls' and tls_case.client_cert == 'valid' %}
+      -cert {{ tls_test_client_cert | quote }} -key {{ tls_test_client_key | quote }} \
+    {% elif tls_case.mode == 'mtls' and tls_case.client_cert == 'selfsigned' %}
+      -cert {{ (tls_test_tmpdir.path ~ '/selfsigned.crt') | quote }} -key {{ (tls_test_tmpdir.path ~ '/selfsigned.key') | quote }} \
+    {% endif %}
+      {{ tls_case.extra_args }} \
+    {% if tls_case.http_check | bool %}
+      -ign_eof 2>&1
+    {% else %}
+      </dev/null 2>&1
+    {% endif %}
+  args:
+    executable: /bin/bash
+  register: _tls_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - tls_case.enabled | bool
+    - _tls_reach in ['ok', 'unchecked']
+
+# Pass rules:
+#   success            client verified server, no reject alert, HTTP status matches
+#                      (TLS 1.3 can print "Verify return code: 0 (ok)" and THEN get
+#                      rejected by the server, which is why the HTTP check matters)
+#   server_reject      client did NOT fail verification (so the refusal came from the
+#                      server), and a reject alert or reject HTTP code was seen
+#   client_verify_fail client-side verify error, no HTTP response
+- name: "{{ tls_case.id }} | Record result"
+  ansible.builtin.set_fact:
+    tls_test_results: "{{ tls_test_results + [_result] }}"
+  vars:
+    _out: "{{ _tls_probe.stdout | default('') }}"
+    _verify_ok: "{{ _out is search('Verify return code: 0 [(]ok[)]') }}"
+    _verify_err: "{{ _out is search('verify error:num=[0-9]+') }}"
+    _verify_line: "{{ _out | regex_search('Verify return code: [0-9]+ [(][^)]*[)]') | default('', true) }}"
+    _alert: "{{ _out | regex_search(tls_test_reject_alert_regex, ignorecase=True) | default('', true) }}"
+    _http: "{{ (_out | regex_search('HTTP/[0-9.]+ [0-9]{3}') | default('none 000', true)).split() | last }}"
+    _want_http: "{{ tls_test_expected_http_status | string }}"
+    _reject_http: "{{ tls_test_reject_http_codes | map('string') | list }}"
+    _passed: >-
+      {{ (_verify_ok | bool and _alert == '' and (not tls_case.http_check | bool or _http == _want_http))
+         if tls_case.expect == 'success' else
+         ((not _verify_err | bool) and _http != _want_http and (_alert != '' or _http in _reject_http))
+         if tls_case.expect == 'server_reject' else
+         (_verify_err | bool and _http == '000') }}
+    _status: >-
+      {{ 'SKIPPED' if not tls_case.enabled | bool else
+         ('UNREACHABLE' if _tls_reach not in ['ok', 'unchecked'] else
+         ('PASS' if _passed | bool else 'FAIL')) }}
+    _detail: >-
+      {%- if not tls_case.enabled | bool -%}site not available yet
+      {%- elif _tls_reach == 'dns' -%}DNS resolution failed for {{ tls_case.target }}
+      {%- elif _tls_reach == 'tcp' -%}TCP connect failed to {{ tls_case.target }}:{{ tls_case.port }}
+      {%- else -%}expect={{ tls_case.expect }} | {{ _verify_line or 'no verify result' }} | http={{ _http }}{{ (' | ' ~ _alert) if _alert else '' }} | rc={{ _tls_probe.rc | default('-') }}
+      {%- endif -%}
+    _result:
+      id: "{{ tls_case.id }}"
+      source: "{{ inventory_hostname }}"
+      target: "{{ tls_case.target }}:{{ tls_case.port }}"
+      mode: "{{ tls_case.mode }}"
+      expect: "{{ tls_case.expect }}"
+      status: "{{ _status }}"
+      detail: "{{ _detail }}"

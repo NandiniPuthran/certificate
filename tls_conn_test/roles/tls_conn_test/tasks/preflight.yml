@@ -1,0 +1,24 @@
+---
+# Separates "network problem" from "TLS problem" so a negative test can never
+# pass just because the port was unreachable. rc: 0 ok, 10 DNS, 11 TCP.
+- name: Preflight | DNS resolution and TCP connect
+  ansible.builtin.shell: |
+    getent hosts {{ item.target | quote }} >/dev/null || exit 10
+    timeout {{ tls_test_tcp_timeout }} bash -c {{ ('</dev/tcp/' ~ item.target ~ '/' ~ item.port) | quote }} || exit 11
+  args:
+    executable: /bin/bash
+  loop: "{{ tls_test_my_cases | selectattr('enabled') | list }}"
+  loop_control:
+    label: "{{ item.id }} -> {{ item.target }}:{{ item.port }}"
+  register: _tls_preflight
+  changed_when: false
+  failed_when: false
+
+- name: Preflight | Record reachability per case
+  ansible.builtin.set_fact:
+    tls_test_reachability: >-
+      {{ tls_test_reachability | default({})
+         | combine({item.item.id: {0: 'ok', 10: 'dns'}.get(item.rc, 'tcp')}) }}
+  loop: "{{ _tls_preflight.results }}"
+  loop_control:
+    label: "{{ item.item.id }}: {{ {0: 'ok', 10: 'dns'}.get(item.rc, 'tcp') }}"

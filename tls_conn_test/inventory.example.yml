@@ -1,0 +1,8 @@
+---
+all:
+  children:
+    tls_test_sources:
+      hosts:
+        site1:
+          ansible_host: 10.0.1.10
+        # add site2..site4 when they come online and have rows with source: siteN

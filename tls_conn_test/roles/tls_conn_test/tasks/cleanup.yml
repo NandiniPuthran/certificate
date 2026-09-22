@@ -1,0 +1,6 @@
+---
+- name: Cleanup | Remove throwaway certificate material
+  ansible.builtin.file:
+    path: "{{ tls_test_tmpdir.path }}"
+    state: absent
+  when: tls_test_tmpdir.path is defined

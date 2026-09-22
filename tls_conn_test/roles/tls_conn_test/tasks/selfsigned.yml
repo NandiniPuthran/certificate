@@ -1,0 +1,34 @@
+---
+- name: Self-signed | Create private temp directory
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: .tlstest
+  register: tls_test_tmpdir
+
+- name: Self-signed | Generate throwaway client certificate (same CN/SAN, no CA)
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - rsa:2048
+      - -nodes
+      - -days
+      - "1"
+      - -subj
+      - "/CN={{ tls_test_selfsigned_cn }}"
+      - -addext
+      - "subjectAltName=DNS:{{ tls_test_selfsigned_cn }}"
+      - -addext
+      - "extendedKeyUsage=clientAuth"
+      - -keyout
+      - "{{ tls_test_tmpdir.path }}/selfsigned.key"
+      - -out
+      - "{{ tls_test_tmpdir.path }}/selfsigned.crt"
+  changed_when: false  # ephemeral; removed in cleanup phase
+
+- name: Self-signed | Restrict key permissions
+  ansible.builtin.file:
+    path: "{{ tls_test_tmpdir.path }}/selfsigned.key"
+    mode: "0600"
