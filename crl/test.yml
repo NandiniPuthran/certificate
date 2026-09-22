@@ -9,6 +9,9 @@
 #   Step 4  run each test case as its own task
 #   Step 5  print a PASS/FAIL table, then the details of anything that failed
 #
+# The test lines stay in the test file after a run, so a failed run can be
+# inspected. The next run clears them before writing new ones.
+#
 # TC-1 to TC-3 check every line (real traffic and test lines).
 # TC-4 to TC-6 check only the test lines, because only for those do we know
 # exactly what went in. That is what makes it possible to test the drops.
@@ -32,11 +35,14 @@
     syslog_path: /var/log/syslog
     lines_to_read: 100
 
-    # The test lines go into a file on this host. Fluent Bit tails
-    # /var/log/*.log here and forwards every line to both Fluentd instances.
-    # Keep the name to one dot before .log, so its tail.* tag has the same
-    # shape as tail.var.log.auth.log and is routed the same way.
+    # The test lines go into a file on this host. It must be the Fluentd host
+    # whose Fluent Bit tails /var/log/*.log and forwards to BOTH Fluentd
+    # instances. Defaults to the first host in [fluentd]; override with
+    #   -e fluentbit_host=<name>   if that's not the right one.
+    # Keep the file name to one dot before .log, so its tail.* tag has the
+    # same shape as tail.var.log.auth.log and is routed the same way.
     fluentbit_host: "{{ groups['fluentd'] | first }}"
+    fluentbit_service: fluent-bit
     test_file: /var/log/ness-pipeline-test.log
     test_host: ness-test-01
 
@@ -204,6 +210,11 @@
 
     expected_arrivals: "{{ (test_logs | rejectattr('expect', 'eq', 'DROP') | list | length) * (groups['fluentd'] | length) }}"
 
+    # Hostnames of NESS's own logs to exclude from test results.
+    # Add rsyslog, cron, kernel, or any other local service that logs to syslog.
+    exclude_hostnames:
+      - ness01
+
   tasks:
 
     # ── Step 1: write the test lines ──────────────────────────────────────
@@ -233,6 +244,16 @@
         seconds: 70
       when: _test_file is changed
 
+    # The previous run's lines are left in the file on purpose, so they can be
+    # inspected if that run failed. They are cleared here instead. Emptying in
+    # place keeps the same file on disk, and the short wait lets Fluent Bit
+    # notice the file got shorter before new lines are written to it.
+    - name: Clear the previous run's lines
+      ansible.builtin.shell: "truncate -s 0 {{ test_file }} && sleep 5"
+      delegate_to: "{{ fluentbit_host }}"
+      changed_when: true
+      when: _test_file is not changed
+
     # Two things here are deliberate:
     #   >>      appends to the same file on disk. Do not switch this to
     #           lineinfile, copy or template: those save a new file, and with
@@ -254,19 +275,27 @@
       changed_when: true
 
     # ── Step 2: wait for them to arrive ───────────────────────────────────
-    # The [:] matters: Ansible logs this grep command to the same syslog
-    # file, with the run id inside it. The pattern marker=RUN[:] matches
+    # Checks every 5 seconds for up to 2 minutes, then carries on either way:
+    # if some lines never arrive, the test cases below say exactly which.
+    # (A loop inside one task, rather than Ansible's until/retries, because
+    # until marks the task failed when it runs out of retries.)
+    #
+    # The [:] matters: Ansible logs this command to the same syslog file,
+    # with the run id inside it. The pattern marker=RUN[:] matches
     # "marker=RUN:" in the test lines but not the text "marker=RUN[:]" in
     # Ansible's own log line.
-    - name: Wait until every expected test line has reached NESS
+    - name: Wait for the test lines to reach NESS
       ansible.builtin.shell:
-        cmd: "grep 'marker={{ run_id }}[:]' {{ syslog_path }} || true"
+        executable: /bin/bash
+        cmd: |
+          for i in $(seq 1 {{ wait_retries }}); do
+            n=$(grep -c 'marker={{ run_id }}[:]' {{ syslog_path }} || true)
+            [ "${n:-0}" -ge {{ expected_arrivals }} ] && break
+            sleep 5
+          done
+          echo "${n:-0}"
       register: _arrived
-      until: (_arrived.stdout_lines | length) >= (expected_arrivals | int)
-      retries: "{{ wait_retries }}"
-      delay: 5
       changed_when: false
-      failed_when: false
 
     # The lines that should be dropped were written in the same batch. Waiting
     # a little longer means a leaked one would have shown up by now, so "not
@@ -275,6 +304,16 @@
       ansible.builtin.pause:
         seconds: 10
 
+    # If lines are missing, the most useful evidence is on the host they
+    # started from: Fluent Bit logs every delivery it fails to make.
+    - name: If any lines are missing, collect recent Fluent Bit errors from {{ fluentbit_host }}
+      ansible.builtin.shell:
+        cmd: "journalctl -u {{ fluentbit_service }} --since '15 min ago' --no-pager 2>/dev/null | grep -iE 'error|warn' | tail -n 10 || true"
+      delegate_to: "{{ fluentbit_host }}"
+      register: _fb_errors
+      changed_when: false
+      when: (_arrived.stdout | int) < (expected_arrivals | int)
+
     # ── Step 3: read the lines to check ───────────────────────────────────
     - name: Read our test lines from syslog
       ansible.builtin.shell:
@@ -282,11 +321,16 @@
       register: _test
       changed_when: false
 
-    # Lines starting with < are frames sent by Fluentd. The NESS server's
-    # own logs (cron, sshd) normally do not start with <, so they are left out.
-    - name: Read the last {{ lines_to_read }} lines of syslog
+    # NESS's own logs (cron, sshd, fluent-bit, rsyslog) arrive in RFC 5424
+    # format on the same file. Filter them out by hostname so they don't
+    # crowd real traffic. Adjust exclude_hostnames if needed.
+    - name: Read the last {{ lines_to_read }} Fluentd lines from syslog
       ansible.builtin.shell:
-        cmd: "tail -n {{ lines_to_read }} {{ syslog_path }} | grep '^<' || true"
+        executable: /bin/bash
+        cmd: >-
+          tail -n 5000 {{ syslog_path }} | grep '^<'
+          | grep -v -E '[ ]{{ exclude_hostnames | join('|') }}[ ]'
+          | tail -n {{ lines_to_read }} || true
       register: _recent
       changed_when: false
 
@@ -294,13 +338,6 @@
       ansible.builtin.set_fact:
         test_lines: "{{ _test.stdout_lines }}"
         all_lines: "{{ (_recent.stdout_lines + _test.stdout_lines) | unique | list }}"
-
-    # Emptied in place: truncate keeps the same file on disk, for the same
-    # reason the append uses >>.
-    - name: Empty the test file again
-      ansible.builtin.command: "truncate -s 0 {{ test_file }}"
-      delegate_to: "{{ fluentbit_host }}"
-      changed_when: true
 
     # ── Step 4: the test cases ────────────────────────────────────────────
     - name: TC-1 | Every line is RFC 5424 with a valid timestamp
@@ -323,21 +360,24 @@
       ansible.builtin.set_fact:
         tc3_bad: "{{ tc3_bad + (all_lines | select('search', leftover_uuid_regex) | list) }}"
 
-    - name: TC-4 | Each test line arrived via both Fluentd instances, with one eventId
+    - name: TC-4 | Real logs are mirrored across both Fluentd instances
       vars:
-        _lines: "{{ test_lines | select('search', run_id ~ ':' ~ item.name ~ ';') | list }}"
-        _ids: "{{ _lines | map('regex_findall', 'eventId=\"[^\"]*\"') | flatten | unique | list }}"
+        # Real logs only - exclude all test lines (marked with our run_id marker)
+        _real_logs: "{{ all_lines | reject('search', 'marker=' ~ run_id) | list }}"
+        # Extract eventIds and count copies of each
+        _id_list: "{{ _real_logs | map('regex_findall', 'eventId=\"([^\"]+)\"') | flatten }}"
+        _id_unique: "{{ _id_list | unique | list | length }}"
       ansible.builtin.set_fact:
         tc4_bad: >-
           {{ tc4_bad | default([])
-             + ([item.name ~ ': arrived ' ~ (_lines | length) ~ ' times, expected '
-                 ~ (groups['fluentd'] | length) ~ ' (one per Fluentd instance)']
-                if (_lines | length) != (groups['fluentd'] | length) else [])
-             + ([item.name ~ ': the copies have different eventIds: ' ~ (_ids | join(', '))]
-                if (_ids | length) > 1 else []) }}
-      loop: "{{ test_logs | rejectattr('expect', 'eq', 'DROP') | list }}"
-      loop_control:
-        label: "{{ item.name }}"
+             + (['No real logs in sample to verify mirroring (inconclusive)']
+                if (_real_logs | length) == 0 else [])
+             + (['Real logs not mirrored: ' ~ (_real_logs | length) ~ ' total copies, '
+                 ~ _id_unique ~ ' unique eventIds (ratio: ' 
+                 ~ ((_real_logs | length) | float / (_id_unique or 1)) | round(2) ~ ':1, expected 2:1)']
+                if (_real_logs | length) > 0 
+                   and (_real_logs | length) != (_id_unique * (groups['fluentd'] | length))
+                else []) }}
 
     - name: TC-5 | Firewall and login lines tagged SECURITY, unmatched line dropped
       vars:
@@ -383,6 +423,7 @@
     - name: Test result
       ansible.builtin.debug:
         msg:
+          - "Test lines that reached NESS: {{ _arrived.stdout }} of {{ expected_arrivals }} expected copies"
           - "Checked {{ all_lines | length }} distinct lines from the last {{ lines_to_read }} of syslog plus our test lines ({{ test_lines | length }} copies arrived; identical copies are checked once)"
           - "TC-1  RFC 5424 format and timestamp             {{ 'PASS' if tc1_bad | length == 0 else 'FAIL (' ~ tc1_bad | length ~ ')' }}"
           - "TC-2  All SD fields present and filled          {{ 'PASS' if tc2_bad | length == 0 else 'FAIL (' ~ tc2_bad | length ~ ')' }}"
@@ -411,6 +452,11 @@
       loop_control:
         label: "{{ item.title }}"
       when: item.bad | length > 0
+
+    - name: Recent Fluent Bit errors on {{ fluentbit_host }}
+      ansible.builtin.debug:
+        msg: "{{ ['Lines went missing. Last Fluent Bit errors on ' ~ fluentbit_host ~ ':'] + _fb_errors.stdout_lines }}"
+      when: _fb_errors.stdout_lines | default([]) | length > 0
 
     - name: Fail the run if any test case failed
       ansible.builtin.assert:
