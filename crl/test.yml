@@ -1,54 +1,50 @@
 ---
-# test-ness-syslog.yml
+# test-ness-pipeline.yml
 #
-# Passive conformance test. Reads a window of real traffic out of
-# /var/log/syslog on the NESS server and checks it. Nothing is injected,
-# nothing is written, no service is touched — safe to run any time, including
-# on a schedule.
+# What this does, in order:
+#   Step 1  append test lines to a test file that Fluent Bit tails
+#           (Fluent Bit forwards every line to both Fluentd instances)
+#   Step 2  wait for the lines to reach /var/log/syslog on the NESS server
+#   Step 3  read the last 100 lines of /var/log/syslog, plus our test lines
+#   Step 4  run each test case as its own task
+#   Step 5  print a PASS/FAIL table, then the details of anything that failed
 #
-#   ansible-playbook -i inventory.ini test-ness-syslog.yml
-#   ansible-playbook -i inventory.ini test-ness-syslog.yml -e window_minutes=60
+# TC-1 to TC-3 check every line (real traffic and test lines).
+# TC-4 to TC-6 check only the test lines, because only for those do we know
+# exactly what went in. That is what makes it possible to test the drops.
 #
-# TC-1  every frame is RFC 5424 with a strict-profile RFC 3339 timestamp
-# TC-2  all required SD fields present and non-empty
-# TC-3  eventId is a valid UUID and the original uuid key is gone
-# TC-4  both Fluentd instances emit each log with the same eventId
-# TC-5  every SECURITY-tagged frame really matches a security pattern
-# TC-6  BAPP tagging is correct, standard BAPP logs are not leaking through,
-#       and no BAPP notification is tagged SECURITY
+# The test lines cover one rule each in filter_event_type.rb, so every
+# classification rule that can be reached from a text line is exercised.
 #
-# Ends with one consolidated table and a single gate task.
+# Run:        ansible-playbook -i inventory.ini test-ness-pipeline.yml
+# Inventory:  a [fluentd] group with both instances, and a [ness] group.
 #
-# What passive testing cannot prove: that logs which SHOULD have been dropped
-# were dropped. Only that nothing wrong leaked through. Proving the drop side
-# needs injected probes with positive controls.
+# NOTE: this sends fake firewall and login events. Safe while NESS alerting
+# is not live. Once it is, agree with the NESS owner how test events are
+# recognised before running this again.
 
-- name: NESS syslog conformance
+- name: NESS pipeline test
   hosts: ness
-  gather_facts: true
   become: true
+  gather_facts: false
 
   vars:
     syslog_path: /var/log/syslog
+    lines_to_read: 100
 
-    # Sample = the last N lines, narrowed to a time window.
-    # The guard band excludes the most recent traffic so a mirrored pair is
-    # never split by the edge of the sample — one copy inside the window and
-    # its twin still in a Fluentd buffer. Size guard_minutes above your
-    # worst-case buffer flush skew between the two instances.
-    sample_lines: 5000
+    # The test lines go into a file on this host. Fluent Bit tails
+    # /var/log/*.log here and forwards every line to both Fluentd instances.
+    # Keep the name to one dot before .log, so its tail.* tag has the same
+    # shape as tail.var.log.auth.log and is routed the same way.
+    fluentbit_host: "{{ groups['fluentd'] | first }}"
+    test_file: /var/log/ness-pipeline-test.log
+    test_host: ness-test-01
 
-    # Lines shown inline per failing check. The full set always goes to the file.
-    report_samples: 3
-    report_path: "/tmp/ness-conformance-{{ inventory_hostname }}.txt"
-    window_minutes: 15
-    guard_minutes: 5
+    # How long to wait for the lines to reach NESS: 24 x 5s = 2 minutes.
+    # Fluentd flushes its output buffer on an interval, so allow for it.
+    wait_retries: 24
 
-    # Both Fluentd instances receive the same logs, so every source log
-    # should appear here exactly twice under one eventId.
-    expected_copies: 2
-
-    sd_required_keys:
+    sd_fields:
       - eventId
       - notificationType
       - eventLevel
@@ -58,301 +54,372 @@
       - siteType
       - siteInstance
 
-    security_patterns:
-      - User Login
-      - Firewall Hit
-
-    # ── Grammar ───────────────────────────────────────────────────────────
-    # Plain YAML strings — backslashes inside a Jinja literal get mangled.
+    # One test line per rule in filter_event_type.rb.
+    #   app     the program name, written as  app[pid]:  like auth.log does
+    #   msg     the message text the rule has to match
+    #   expect  SECURITY, BAPP or DROP
+    #   event   the eventName the line should get (SECURITY lines only)
     #
-    # TIMESTAMP is the RFC 5424 §6.2.3 profile, not bare RFC 3339: uppercase
-    # T and Z only, at most 6 fractional digits, -00:00 forbidden.
-    _ts: '(?:-|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|(?!-00:00)[+-](?:0[0-9]|1[0-4]):[0-5][0-9]))'
-    _pre: '^<(?:0|[1-9][0-9]{0,2})>[1-9][0-9]?[ ]'
-    _post: '[ ](?:-|[!-~]{1,255})[ ](?:-|[!-~]{1,48})[ ](?:-|[!-~]{1,128})[ ](?:-|[!-~]{1,32})'
-    # PARAM-VALUE must escape " \ and ] — this is what catches an eventName
-    # containing a bracket terminating its SD element early.
-    _sd: '[ ](?:-|(?:\[[!-~]{1,32}(?:[ ][!-~]{1,32}="(?:[^"\\\]]|\\["\\\]])*")*\])+)'
-    _msg: '(?:[ ][\s\S]*)?$'
-    rfc5424_regex: "{{ _pre ~ _ts ~ _post ~ _sd ~ _msg }}"
+    # Case names deliberately avoid words the rules look for (login, bapp_,
+    # DROP, ...) so the marker added to each line can't trigger a rule by itself.
+    test_logs:
 
-    # Positional: HOSTNAME is field 3, APP-NAME field 4.
-    src_regex: '^<[0-9]{1,3}>[0-9]{1,2} [^ ]+ ([^ ]+) ([^ ]+) '
-    bapp_app_regex: '^<[0-9]{1,3}>[0-9]{1,2} [^ ]+ [^ ]+ bapp_[!-~]+ '
-    uuid_in_sd_regex: 'eventId="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"'
-    stale_uuid_regex: '[ ][uU][uU][iI][dD]="'
-    security_alt: "{{ security_patterns | join('|') }}"
+      # ── TC-5: firewall rules ─────────────────────────────────────────────
+      - name: fw-vendor               # rule: id=firewall + logtype + action
+        tc: TC-5
+        expect: SECURITY
+        event: firewall_rule
+        app: fw
+        msg: 'id=firewall logtype="filter" action=drop src=10.99.0.5 dst=10.99.0.1 dstport=22'
+
+      - name: fw-generic              # rule: DROP or REJECT without id=firewall
+        tc: TC-5
+        expect: SECURITY
+        event: firewall_rule
+        app: kernel
+        msg: 'DROP IN=eth0 OUT= SRC=10.99.0.5 DST=10.99.0.1 PROTO=TCP DPT=22'
+
+      # ── TC-5: login rules ────────────────────────────────────────────────
+      - name: sec-cisco               # rule: %SEC_LOGIN-[45]-LOGIN_...
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: ios
+        msg: '%SEC_LOGIN-5-LOGIN_SUCCESS: Login Success [user: testuser] [Source: 10.99.0.5] [localport: 22]'
+
+      - name: sec-authfail            # rule: authentication failure | ...
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: sshd
+        msg: 'pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=10.99.0.5 user=testuser'
+
+      - name: sec-logtype             # rule: logtype=auth + error message
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: appliance
+        msg: 'logtype="auth" user=testuser src=10.99.0.5 error="Authentication has failed"'
+
+      - name: sec-success             # rule: login successful | ...
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: webportal
+        msg: 'user testuser login successful from 10.99.0.5'
+
+      - name: sec-authd               # rule: user ... authenticated | ...
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: webportal
+        msg: 'user testuser has been authenticated from 10.99.0.5'
+
+      - name: sec-ssh                 # rule: Accepted password for | ...
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: sshd
+        msg: 'Accepted password for testuser from 10.99.0.5 port 22 ssh2'
+
+      - name: sec-su                  # rule: session opened (same format as real auth.log)
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: su
+        msg: 'pam_unix(su:session): session opened for user root(uid=0) by testuser(uid=1001)'
+
+      - name: sec-deepsec             # rule: user login | ... + app is Deep Security
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: ds_agent
+        msg: 'User Login succeeded for testuser from 10.99.0.5'
+
+      - name: sec-proxmox             # rule: pveproxy ... login + app is Proxmox
+        tc: TC-5
+        expect: SECURITY
+        event: user_login
+        app: pveproxy
+        msg: 'pveproxy worker 4242 login for testuser@pam from 10.99.0.5'
+
+      # ── TC-5: no rule matches, so it must be dropped ─────────────────────
+      - name: noise
+        tc: TC-5
+        expect: DROP
+        app: healthcheck
+        msg: 'routine heartbeat ok interval=60'
+
+      # ── TC-6: BAPP. No BAPP logs exist yet, so these define the format:
+      #    app name bapp_<appname>, traceType as key=value in the message.
+      - name: bp-event                # a BAPP notification
+        tc: TC-6
+        expect: BAPP
+        app: bapp_payments
+        msg: 'traceType=EVENT payment authorised amount=100'
+
+      - name: bp-log                  # a standard BAPP log: must be dropped
+        tc: TC-6
+        expect: DROP
+        app: bapp_payments
+        msg: 'traceType=INFO cache warmed entries=512'
+
+      - name: bp-mixed                # BAPP notification that mentions a failed
+        tc: TC-6                      # password: must be BAPP, not SECURITY
+        expect: BAPP
+        app: bapp_payments
+        msg: 'traceType=EVENT Failed password for operator from 10.99.0.5'
+
+      # ── Edge cases. Decide the right outcome, then uncomment. ────────────
+      # Today the code gives: cron -> SECURITY, bapp_svc -> BAPP, DROP TABLE -> SECURITY.
+      #
+      # - name: edge-cron             # a cron job, not a person logging in
+      #   tc: TC-5
+      #   expect: DROP
+      #   app: CRON
+      #   msg: 'pam_unix(cron:session): session opened for user root(uid=0) by (uid=0)'
+      #
+      # - name: edge-svcacct          # failed SSH login for a bapp_ service account
+      #   tc: TC-5
+      #   expect: SECURITY
+      #   event: user_login
+      #   app: sshd
+      #   msg: 'Failed password for bapp_svc from 10.99.0.5 port 22 ssh2'
+      #
+      # - name: edge-sql              # a database statement, not a firewall hit
+      #   tc: TC-5
+      #   expect: DROP
+      #   app: postgres
+      #   msg: 'statement: DROP TABLE staging_orders'
+
+    # RFC 5424 format. The timestamp must follow the strict RFC 5424 rules
+    # (uppercase T and Z, at most 6 digits after the dot). Also rejects an
+    # unescaped " \ or ] inside a structured-data value.
+    rfc5424_regex: '^<(?:0|[1-9][0-9]{0,2})>[1-9][0-9]?[ ](?:-|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|(?!-00:00)[+-](?:0[0-9]|1[0-4]):[0-5][0-9]))[ ](?:-|[!-~]{1,255})[ ](?:-|[!-~]{1,48})[ ](?:-|[!-~]{1,128})[ ](?:-|[!-~]{1,32})[ ](?:-|(?:\[[!-~]{1,32}(?:[ ][!-~]{1,32}="(?:[^"\\\]]|\\["\\\]])*")*\])+)(?:[ ][\s\S]*)?$'
+
+    uuid_regex: 'eventId="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"'
+
+    # A uuid parameter still inside the eventmeta structured data.
+    leftover_uuid_regex: '\[eventmeta[^\]]* uuid="'
+
+    expected_arrivals: "{{ (test_logs | rejectattr('expect', 'eq', 'DROP') | list | length) * (groups['fluentd'] | length) }}"
 
   tasks:
 
-    # ── Sample ────────────────────────────────────────────────────────────
-    - name: Fix the window bounds once so every read sees the same slice
+    # ── Step 1: write the test lines ──────────────────────────────────────
+    - name: Prepare a unique run id and timestamp
+      ansible.builtin.set_fact:
+        run_id: "TEST{{ now(true, '%Y%m%d%H%M%S') }}"
+        # Same format as the real lines in /var/log/auth.log:
+        #   2026-09-22T04:17:09.4777525+00:00
+        line_ts: "{{ now(true, '%Y-%m-%dT%H:%M:%S.%f') }}0+00:00"
+
+    - name: Make sure the test file exists
+      ansible.builtin.file:
+        path: "{{ test_file }}"
+        state: touch
+        owner: root
+        group: adm
+        mode: "0640"
+        modification_time: preserve
+        access_time: preserve
+      delegate_to: "{{ fluentbit_host }}"
+      register: _test_file
+
+    # Fluent Bit looks for new files once a minute, so on the very first run
+    # it has to be given time to start watching the file.
+    - name: First run only - wait for Fluent Bit to start watching the new file
+      ansible.builtin.pause:
+        seconds: 70
+      when: _test_file is changed
+
+    # Two things here are deliberate:
+    #   >>      appends to the same file on disk. Do not switch this to
+    #           lineinfile, copy or template: those save a new file, and with
+    #           read_from_head on, Fluent Bit would read the whole file again
+    #           and send every line twice.
+    #   no_log  stops Ansible writing this command, test lines and all, to
+    #           /var/log/user.log, which Fluent Bit also tails.
+    - name: Append the test lines to the test file
       ansible.builtin.shell:
         executable: /bin/bash
         cmd: |
-          date -u -d '-{{ window_minutes }} minutes' '+%Y-%m-%dT%H:%M:%S'
-          date -u -d '-{{ guard_minutes }} minutes' '+%Y-%m-%dT%H:%M:%S'
-      register: _bounds
-      changed_when: false
+          {
+          {% for t in test_logs %}
+          printf '%s\n' {{ (line_ts ~ ' ' ~ test_host ~ ' ' ~ t.app ~ '[4242]: ' ~ t.msg ~ ' marker=' ~ run_id ~ ':' ~ t.name ~ ';') | quote }}
+          {% endfor %}
+          } >> {{ test_file }}
+      delegate_to: "{{ fluentbit_host }}"
+      no_log: true
+      changed_when: true
 
-    - name: Set the window
-      ansible.builtin.set_fact:
-        window_from: "{{ _bounds.stdout_lines[0] }}"
-        window_to: "{{ _bounds.stdout_lines[1] }}"
-        # Lines starting with < are what Fluentd sends. The NESS box's own
-        # cron/sshd/systemd logs are in this file too and are not RFC 5424 —
-        # they would fail every check, so they are excluded here rather than
-        # asserted on.
-        window_cmd: >-
-          tail -n {{ sample_lines }} '{{ syslog_path }}' | grep '^<' |
-          awk -v f='{{ _bounds.stdout_lines[0] }}' -v t='{{ _bounds.stdout_lines[1] }}'
-          'substr($2,1,19) >= f && substr($2,1,19) <= t'
-
-    - name: Read the window
+    # ── Step 2: wait for them to arrive ───────────────────────────────────
+    # The [:] matters: Ansible logs this grep command to the same syslog
+    # file, with the run id inside it. The pattern marker=RUN[:] matches
+    # "marker=RUN:" in the test lines but not the text "marker=RUN[:]" in
+    # Ansible's own log line.
+    - name: Wait until every expected test line has reached NESS
       ansible.builtin.shell:
-        executable: /bin/bash
-        cmd: "{{ window_cmd }}"
-      register: _sample
+        cmd: "grep 'marker={{ run_id }}[:]' {{ syslog_path }} || true"
+      register: _arrived
+      until: (_arrived.stdout_lines | length) >= (expected_arrivals | int)
+      retries: "{{ wait_retries }}"
+      delay: 5
       changed_when: false
       failed_when: false
 
-    - name: Collect frames
-      ansible.builtin.set_fact:
-        frames: "{{ _sample.stdout_lines }}"
+    # The lines that should be dropped were written in the same batch. Waiting
+    # a little longer means a leaked one would have shown up by now, so "not
+    # there" really means "dropped".
+    - name: Give any should-be-dropped lines time to show up if they leaked
+      ansible.builtin.pause:
+        seconds: 10
 
-    # Hard gate. Zero frames makes every check below fail for one root cause,
-    # and a table of six FAILs would tell you nothing.
-    - name: Gate | The window contains frames to test
-      ansible.builtin.assert:
-        that:
-          - frames | length > 0
-        fail_msg: >-
-          No RFC 5424 frames in {{ syslog_path }} between {{ window_from }}Z
-          and {{ window_to }}Z. Either Fluentd is not delivering, or the last
-          {{ sample_lines }} lines predate the window — raise sample_lines or
-          window_minutes and re-run.
-        quiet: true
-
-    # ── Diagnostics (reported, not asserted) ──────────────────────────────
-    - name: Count frames whose timestamp is not UTC
+    # ── Step 3: read the lines to check ───────────────────────────────────
+    - name: Read our test lines from syslog
       ansible.builtin.shell:
-        executable: /bin/bash
-        cmd: "{{ window_cmd }} | awk '$2 !~ /Z$/' | wc -l"
-      register: _non_utc
+        cmd: "grep 'marker={{ run_id }}[:]' {{ syslog_path }} || true"
+      register: _test
       changed_when: false
 
-    # A frame that lost its PRI entirely is filtered out by the ^< grep rather
-    # than flagged. This counts non-PRI lines that did not come from the NESS
-    # box itself, which is what that failure would look like.
-    - name: Count non-PRI lines from a foreign host
+    # Lines starting with < are frames sent by Fluentd. The NESS server's
+    # own logs (cron, sshd) normally do not start with <, so they are left out.
+    - name: Read the last {{ lines_to_read }} lines of syslog
       ansible.builtin.shell:
-        executable: /bin/bash
-        cmd: >-
-          tail -n {{ sample_lines }} '{{ syslog_path }}' | grep -v '^<'
-          | grep -v ' {{ ansible_facts.hostname }} ' | wc -l
-      register: _no_pri
+        cmd: "tail -n {{ lines_to_read }} {{ syslog_path }} | grep '^<' || true"
+      register: _recent
       changed_when: false
 
-    # ── TC-4, done in awk because grouping thousands of lines in Jinja is
-    #    quadratic. Any eventId not appearing exactly twice is reported.
-    - name: TC-4 | Group frames by eventId
-      ansible.builtin.shell:
-        executable: /bin/bash
-        cmd: >-
-          {{ window_cmd }} | grep -o 'eventId="[^"]*"' | sort | uniq -c
-          | awk '$1 != {{ expected_copies }} {print $1" "$2}' | head -20
-      register: _bad_groups
-      changed_when: false
-
-    - name: TC-4 | Count total and distinct eventIds
-      ansible.builtin.shell:
-        executable: /bin/bash
-        cmd: |
-          set -uo pipefail
-          T=$({{ window_cmd }} | grep -c 'eventId="')
-          D=$({{ window_cmd }} | grep -o 'eventId="[^"]*"' | sort -u | wc -l)
-          echo "$T"; echo "$D"
-      register: _id_counts
-      changed_when: false
-      failed_when: false
-
-    # ── Evaluate every check as a set operation ───────────────────────────
-    # One task per check rather than a loop over every line: a loop would be
-    # one Ansible task iteration per log line, which is unusable at this
-    # volume. These are vectorised, so the whole sample is one pass each.
-    - name: Find lines failing each required SD key
+    - name: Combine them into the lines to check
       ansible.builtin.set_fact:
-        sd_failures: >-
-          {{ sd_failures | default({}) | combine({
-               item: frames | reject('search', item ~ '="[^"]+"') | list
-             }) }}
-      loop: "{{ sd_required_keys }}"
-      loop_control:
-        label: "{{ item }}"
+        test_lines: "{{ _test.stdout_lines }}"
+        all_lines: "{{ (_recent.stdout_lines + _test.stdout_lines) | unique | list }}"
 
-    - name: Evaluate all checks
+    # Emptied in place: truncate keeps the same file on disk, for the same
+    # reason the append uses >>.
+    - name: Empty the test file again
+      ansible.builtin.command: "truncate -s 0 {{ test_file }}"
+      delegate_to: "{{ fluentbit_host }}"
+      changed_when: true
+
+    # ── Step 4: the test cases ────────────────────────────────────────────
+    - name: TC-1 | Every line is RFC 5424 with a valid timestamp
       ansible.builtin.set_fact:
-        fail_tc1: "{{ frames | reject('match', rfc5424_regex) | list }}"
-        fail_tc2: "{{ sd_failures.values() | flatten | unique | list }}"
-        fail_tc3a: "{{ frames | reject('search', uuid_in_sd_regex) | list }}"
-        fail_tc3b: "{{ frames | select('search', stale_uuid_regex) | list }}"
-        fail_tc5: >-
-          {{ frames | select('search', 'nessLogType="SECURITY"')
-             | reject('search', security_alt) | list }}
-        fail_tc6a: >-
-          {{ frames | select('search', 'nessLogType="BAPP"')
-             | reject('search', 'traceType="EVENT"') | list }}
-        fail_tc6b: >-
-          {{ frames | select('search', 'nessLogType="BAPP"')
-             | reject('match', bapp_app_regex) | list }}
-        fail_tc6c: >-
-          {{ frames | select('match', bapp_app_regex)
-             | reject('search', 'traceType="EVENT"') | list }}
-        fail_tc6d: >-
-          {{ frames | select('match', bapp_app_regex)
-             | select('search', 'nessLogType="SECURITY"') | list }}
+        tc1_bad: "{{ all_lines | reject('match', rfc5424_regex) | list }}"
 
-    - name: Summarise which SD keys are failing
-      ansible.builtin.set_fact:
-        sd_detail: >-
-          {{ (sd_detail | default([]))
-             + ([] if item.value | length == 0
-                else [item.key ~ ' (' ~ (item.value | length) ~ ')']) }}
-      loop: "{{ sd_failures | dict2items }}"
-      loop_control:
-        label: "{{ item.key }}"
-
-    - name: Normalise TC-4 output into the same shape as the others
-      ansible.builtin.set_fact:
-        fail_tc4: "{{ _bad_groups.stdout_lines }}"
-
-    # Coverage. A check that found nothing to test passes vacuously — if the
-    # window held no BAPP traffic, TC-6 is green because it had no work to do.
-    # These counts are in the report header so a meaningless PASS is visible.
-    - name: Measure coverage
-      ansible.builtin.set_fact:
-        n_security: "{{ frames | select('search', 'nessLogType=\"SECURITY\"') | list | length }}"
-        n_bapp: "{{ frames | select('search', 'nessLogType=\"BAPP\"') | list | length }}"
-        n_bapp_app: "{{ frames | select('match', bapp_app_regex) | list | length }}"
-
-    # checks carries metadata only. The failing lines stay in their own facts
-    # and are looked up by name, so log lines are never round-tripped through
-    # a nested fact structure.
-    - name: Assemble the check list
-      ansible.builtin.set_fact:
-        checks:
-          - { id: "TC-1",  var: "fail_tc1",  desc: "RFC 5424 frame and timestamp",
-              cause: "lowercase t/z, over 6 fractional digits, or an unescaped ] in an SD value" }
-          - { id: "TC-2",  var: "fail_tc2",  desc: "SD fields complete and non-empty",
-              cause: "missing per key: {{ sd_detail | default(['none']) | join(', ') }}" }
-          - { id: "TC-3a", var: "fail_tc3a", desc: "eventId is a valid UUID",
-              cause: "eventId absent, malformed, or holding a non-UUID value" }
-          - { id: "TC-3b", var: "fail_tc3b", desc: "Original uuid key removed after rename",
-              cause: "the transform added eventId instead of moving it - add remove_keys uuid" }
-          - { id: "TC-4",  var: "fail_tc4",  desc: "Each log mirrored across both instances",
-              cause: "eventIds not seen exactly {{ expected_copies }} times (count then eventId)" }
-          - { id: "TC-5",  var: "fail_tc5",  desc: "SECURITY frames match a security pattern",
-              cause: "tagged SECURITY but matches none of: {{ security_alt }}" }
-          - { id: "TC-6a", var: "fail_tc6a", desc: "BAPP frames carry traceType=EVENT",
-              cause: "a standard BAPP log was tagged as a notification" }
-          - { id: "TC-6b", var: "fail_tc6b", desc: "BAPP frames come from a bapp_* app",
-              cause: "BAPP tag applied to a non-BAPP source" }
-          - { id: "TC-6c", var: "fail_tc6c", desc: "Non-EVENT bapp_* logs are not leaking",
-              cause: "these should have been dropped before reaching NESS" }
-          - { id: "TC-6d", var: "fail_tc6d", desc: "BAPP notifications never tagged SECURITY",
-              cause: "the SECURITY matcher is running ahead of the BAPP rule" }
-
-    - name: Identify which checks failed
-      ansible.builtin.set_fact:
-        failed_ids: >-
-          {{ (failed_ids | default([]))
-             + ([item.id] if (lookup('vars', item.var) | length) > 0 else []) }}
-      loop: "{{ checks }}"
-      loop_control:
-        label: "{{ item.id }}"
-
-    - name: Compute the mirroring verdict
+    - name: TC-2 | Every line has all SD fields, none of them empty
       vars:
-        _counts: "{{ _id_counts.stdout_lines + ['0', '0'] }}"
+        _missing: "{{ all_lines | reject('search', item ~ '=\"[^\"]+\"') | list }}"
       ansible.builtin.set_fact:
-        mirror_verdict: >-
-          {{ 'no eventIds found at all' if _counts[1] | int == 0
-             else ('correctly mirrored'
-                   if _counts[0] | int == (expected_copies | int) * (_counts[1] | int)
-             else ('every frame has a unique eventId - each instance is generating its own
-                    instead of preserving the input'
-                   if _counts[0] | int == _counts[1] | int
-             else 'partial - some pairs split, or one instance is behind')) }}
+        tc2_bad: "{{ (tc2_bad | default([]) + _missing) | unique | list }}"
+        tc2_fields: "{{ tc2_fields | default([]) + ([item] if _missing | length > 0 else []) }}"
+      loop: "{{ sd_fields }}"
 
-    # Built as one string for the file, then split into lines for the console.
-    # The default stdout callback prints a list one element per line, but
-    # renders a multi-line string as a single line full of literal \n.
-    - name: Render the report
+    - name: TC-3 | Every eventId is a valid UUID
       ansible.builtin.set_fact:
-        report: |
-          NESS syslog conformance   {{ inventory_hostname }}
-          window    {{ window_from }}Z .. {{ window_to }}Z
-          frames    {{ frames | length }}
-          coverage  SECURITY {{ n_security }}   BAPP {{ n_bapp }}   bapp_* apps {{ n_bapp_app }}
+        tc3_bad: "{{ all_lines | reject('search', uuid_regex) | list }}"
 
-          {% for c in checks %}
-          {% set bad = lookup('vars', c.var) %}
-          {{ 'FAIL' if bad | length > 0 else 'PASS' }}  {{ '%-6s' | format(c.id) }}{{ '%-42s' | format(c.desc) }}{{ (bad | length ~ ' lines') if bad | length > 0 else '' }}
-          {% endfor %}
+    - name: TC-3 | The uuid key was renamed, not copied
+      ansible.builtin.set_fact:
+        tc3_bad: "{{ tc3_bad + (all_lines | select('search', leftover_uuid_regex) | list) }}"
 
-          RESULT    {{ 'FAIL' if failed_ids | default([]) | length > 0 else 'PASS' }}   {{ (checks | length) - (failed_ids | default([]) | length) }}/{{ checks | length }} checks passed
-          eventIds  {{ _id_counts.stdout_lines[0] }} total, {{ _id_counts.stdout_lines[1] }} distinct  ->  {{ mirror_verdict }}
-          notices   {{ _non_utc.stdout | trim }} non-UTC timestamps, {{ _no_pri.stdout | trim }} non-PRI lines from a foreign host
-          {% for c in checks %}
-          {% set bad = lookup('vars', c.var) %}
-          {% if bad | length > 0 %}
-          {% set srcs = bad[:1000] | map('regex_search', src_regex, '\\1', '\\2') | map('default', [], true) | map('join', '/') | reject('eq', '') | list %}
+    - name: TC-4 | Each test line arrived via both Fluentd instances, with one eventId
+      vars:
+        _lines: "{{ test_lines | select('search', run_id ~ ':' ~ item.name ~ ';') | list }}"
+        _ids: "{{ _lines | map('regex_findall', 'eventId=\"[^\"]*\"') | flatten | unique | list }}"
+      ansible.builtin.set_fact:
+        tc4_bad: >-
+          {{ tc4_bad | default([])
+             + ([item.name ~ ': arrived ' ~ (_lines | length) ~ ' times, expected '
+                 ~ (groups['fluentd'] | length) ~ ' (one per Fluentd instance)']
+                if (_lines | length) != (groups['fluentd'] | length) else [])
+             + ([item.name ~ ': the copies have different eventIds: ' ~ (_ids | join(', '))]
+                if (_ids | length) > 1 else []) }}
+      loop: "{{ test_logs | rejectattr('expect', 'eq', 'DROP') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
 
-          ----------------------------------------------------------------------
-          {{ c.id }}  {{ c.desc }}   -   {{ bad | length }} lines
+    - name: TC-5 | Firewall and login lines tagged SECURITY, unmatched line dropped
+      vars:
+        _lines: "{{ test_lines | select('search', run_id ~ ':' ~ item.name ~ ';') | list }}"
+        _type: "{{ _lines | map('regex_findall', 'nessLogType=\"[^\"]*\"') | flatten | unique | join(', ') }}"
+        _name: "{{ _lines | map('regex_findall', 'eventName=\"[^\"]*\"') | flatten | unique | join(', ') }}"
+      ansible.builtin.set_fact:
+        tc5_bad: >-
+          {{ tc5_bad | default([])
+             + ([item.name ~ ': should have been dropped, but arrived ' ~ (_lines | length) ~ ' times']
+                if item.expect == 'DROP' and (_lines | length) > 0 else [])
+             + ([item.name ~ ': did not arrive at all']
+                if item.expect != 'DROP' and (_lines | length) == 0 else [])
+             + ([item.name ~ ': expected nessLogType=' ~ item.expect ~ ', got ' ~ (_type or 'none')]
+                if item.expect != 'DROP' and (_lines | length) > 0
+                   and _type != 'nessLogType="' ~ item.expect ~ '"' else [])
+             + ([item.name ~ ': expected eventName=' ~ item.event ~ ', got ' ~ (_name or 'none')]
+                if item.event is defined and (_lines | length) > 0
+                   and _name != 'eventName="' ~ item.event ~ '"' else []) }}
+      loop: "{{ test_logs | selectattr('tc', 'eq', 'TC-5') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
 
-            cause    {{ c.cause }}
-          {% if srcs | length > 0 %}
-            sources  {% for s in srcs | unique %}{{ s }} ({{ srcs.count(s) }}){{ ', ' if not loop.last else '' }}{% endfor %}
+    - name: TC-6 | BAPP notifications tagged BAPP, standard BAPP log dropped
+      vars:
+        _lines: "{{ test_lines | select('search', run_id ~ ':' ~ item.name ~ ';') | list }}"
+        _type: "{{ _lines | map('regex_findall', 'nessLogType=\"[^\"]*\"') | flatten | unique | join(', ') }}"
+      ansible.builtin.set_fact:
+        tc6_bad: >-
+          {{ tc6_bad | default([])
+             + ([item.name ~ ': should have been dropped, but arrived ' ~ (_lines | length) ~ ' times']
+                if item.expect == 'DROP' and (_lines | length) > 0 else [])
+             + ([item.name ~ ': did not arrive at all']
+                if item.expect != 'DROP' and (_lines | length) == 0 else [])
+             + ([item.name ~ ': expected nessLogType=' ~ item.expect ~ ', got ' ~ (_type or 'none')]
+                if item.expect != 'DROP' and (_lines | length) > 0
+                   and _type != 'nessLogType="' ~ item.expect ~ '"' else []) }}
+      loop: "{{ test_logs | selectattr('tc', 'eq', 'TC-6') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
 
-          {% endif %}
-          {% for line in bad[:report_samples] %}
-            {{ line }}
-          {% endfor %}
-          {% if bad | length > report_samples %}
-            ... {{ bad | length - report_samples }} more, see {{ report_path }}
-          {% endif %}
-          {% endif %}
-          {% endfor %}
-
+    # ── Step 5: results ───────────────────────────────────────────────────
     - name: Test result
       ansible.builtin.debug:
-        msg: "{{ report.splitlines() }}"
+        msg:
+          - "Checked {{ all_lines | length }} distinct lines from the last {{ lines_to_read }} of syslog plus our test lines ({{ test_lines | length }} copies arrived; identical copies are checked once)"
+          - "TC-1  RFC 5424 format and timestamp             {{ 'PASS' if tc1_bad | length == 0 else 'FAIL (' ~ tc1_bad | length ~ ')' }}"
+          - "TC-2  All SD fields present and filled          {{ 'PASS' if tc2_bad | length == 0 else 'FAIL (' ~ tc2_bad | length ~ ')' }}"
+          - "TC-3  uuid renamed to a valid eventId           {{ 'PASS' if tc3_bad | length == 0 else 'FAIL (' ~ tc3_bad | length ~ ')' }}"
+          - "TC-4  Same eventId from both Fluentd instances  {{ 'PASS' if tc4_bad | length == 0 else 'FAIL (' ~ tc4_bad | length ~ ')' }}"
+          - "TC-5  SECURITY tagged, unmatched dropped        {{ 'PASS' if tc5_bad | length == 0 else 'FAIL (' ~ tc5_bad | length ~ ')' }}"
+          - "TC-6  BAPP notifications pass, BAPP logs drop   {{ 'PASS' if tc6_bad | length == 0 else 'FAIL (' ~ tc6_bad | length ~ ')' }}"
+          - "RESULT: {{ 'PASS' if (tc1_bad + tc2_bad + tc3_bad + tc4_bad + tc5_bad + tc6_bad) | length == 0 else 'FAIL' }}"
 
-    # Full, untruncated failing lines — for grepping, or attaching to a ticket.
-    - name: Write the full report to the controller
-      ansible.builtin.copy:
-        dest: "{{ report_path }}"
-        mode: "0644"
-        content: |
-          {{ report }}
-          {% for c in checks %}
-          {% set bad = lookup('vars', c.var) %}
-          {% if bad | length > 0 %}
+    - name: What failed
+      ansible.builtin.debug:
+        msg: "{{ [item.title] + item.bad[:5] }}"
+      loop:
+        - title: "TC-1  lines that are not valid RFC 5424:"
+          bad: "{{ tc1_bad }}"
+        - title: "TC-2  lines missing SD fields ({{ tc2_fields | unique | join(', ') }}):"
+          bad: "{{ tc2_bad }}"
+        - title: "TC-3  lines with a bad eventId or a leftover uuid key:"
+          bad: "{{ tc3_bad }}"
+        - title: "TC-4  problems:"
+          bad: "{{ tc4_bad }}"
+        - title: "TC-5  problems:"
+          bad: "{{ tc5_bad }}"
+        - title: "TC-6  problems:"
+          bad: "{{ tc6_bad }}"
+      loop_control:
+        label: "{{ item.title }}"
+      when: item.bad | length > 0
 
-          ===== {{ c.id }}  all {{ bad | length }} failing lines =====
-          {% for line in bad %}
-          {{ line }}
-          {% endfor %}
-          {% endif %}
-          {% endfor %}
-      delegate_to: localhost
-      become: false
-      changed_when: false
-
-    - name: Gate | Every check passed
+    - name: Fail the run if any test case failed
       ansible.builtin.assert:
         that:
-          - failed_ids | default([]) | length == 0
-        fail_msg: "Failed: {{ failed_ids | default([]) | join(', ') }}. Full lines in {{ report_path }}"
+          - tc1_bad | length == 0
+          - tc2_bad | length == 0
+          - tc3_bad | length == 0
+          - tc4_bad | length == 0
+          - tc5_bad | length == 0
+          - tc6_bad | length == 0
+        fail_msg: "One or more test cases failed - see 'Test result' and 'What failed' above."
         quiet: true
