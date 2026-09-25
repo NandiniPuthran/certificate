@@ -93,6 +93,7 @@
       - item.client_cert in ['valid', 'selfsigned', 'none']
       - item.trust in ['ca', 'selfsigned']
       - item.expect in ['success', 'server_reject', 'client_verify_fail']
+      - item.reject_check in ['handshake', 'request']
     fail_msg: "Invalid test case: {{ item.id | default('<no id>') }}"
     quiet: true
   loop: "{{ tls_test_my_cases }}"
@@ -115,15 +116,8 @@
       ansible.builtin.include_tasks:
         file: preflight.yml
         apply:
-          tags: [preflight, tls, mtls, negative, discover]
-      tags: [preflight, tls, mtls, negative, discover]
-
-    - name: Phase | discover (which endpoints speak HTTP) - run with --tags discover
-      ansible.builtin.include_tasks:
-        file: discover.yml
-        apply:
-          tags: [discover]
-      tags: [never, discover]
+          tags: [preflight, tls, mtls, negative]
+      tags: [preflight, tls, mtls, negative]
 
     - name: Phase | generate throwaway self-signed certificate
       ansible.builtin.include_tasks:
