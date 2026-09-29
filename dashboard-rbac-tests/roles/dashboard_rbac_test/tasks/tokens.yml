@@ -1,0 +1,62 @@
+---
+# Uses the OAuth2 password grant. The client needs "Direct access grants" enabled
+# (in a test environment, or via a dedicated test client with the same role mappers).
+- name: Tokens | Password grant for every test user
+  ansible.builtin.uri:
+    url: "{{ rbac_token_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body: "{{ _rbac_token_body }}"
+    status_code: [200, 400, 401]
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  vars:
+    _user_key: "{{ item }}"
+  loop: "{{ rbac_users.keys() | list }}"
+  register: _rbac_tok
+  no_log: "{{ rbac_no_log }}"
+
+- name: Tokens | Store token and HTTP status per user
+  ansible.builtin.set_fact:
+    rbac_tokens: "{{ rbac_tokens | default({}) | combine({item.item: (item.json if item.status == 200 else {})}) }}"
+    rbac_token_status: "{{ rbac_token_status | default({}) | combine({item.item: item.status}) }}"
+  loop: "{{ _rbac_tok.results }}"
+  no_log: "{{ rbac_no_log }}"
+
+- name: Tokens | Login result per test user
+  ansible.builtin.debug:
+    var: rbac_token_status
+
+- name: Tokens | Admin, SysAdmin and Business must be able to log in
+  ansible.builtin.assert:
+    that:
+      - rbac_token_status.admin == 200
+      - rbac_token_status.sysadmin == 200
+      - rbac_token_status.business == 200
+    fail_msg: >-
+      Token request failed. HTTP 400 'unauthorized_client' means Direct Access Grants are disabled
+      on client '{{ rbac_client_id }}'. HTTP 401 means wrong credentials or the user is disabled in FreeIPA.
+    quiet: true
+
+# Sanity gate: if the API does not accept bearer tokens, every deny-check would
+# "pass" with 401 and the whole suite would be meaningless.
+- name: Tokens | Dashboard API accepts the Administrator bearer token
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+    headers:
+      Authorization: "Bearer {{ rbac_tokens.admin.access_token }}"
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+    follow_redirects: none
+  register: _rbac_bearer_gate
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: Tokens | Stop if bearer auth does not work
+  ansible.builtin.assert:
+    that: _rbac_bearer_gate.status == 200
+    fail_msg: >-
+      GET {{ rbac_whoami_path }} with a valid Administrator token returned HTTP {{ _rbac_bearer_gate.status }}.
+      Either the path is wrong or the dashboard API does not accept Keycloak bearer tokens
+      (cookie-session only). Deny-checks would pass trivially, so the run stops here.
+    quiet: true

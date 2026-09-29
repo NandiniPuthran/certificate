@@ -1,0 +1,10 @@
+---
+# Copy to vault.yml, fill in, then: ansible-vault encrypt group_vars/all/vault.yml
+vault_rbac_client_secret: ""
+vault_rbac_pw_admin: "CHANGE_ME"
+vault_rbac_pw_sysadmin: "CHANGE_ME"
+vault_rbac_pw_business: "CHANGE_ME"
+vault_rbac_pw_norole: "CHANGE_ME"
+vault_rbac_pw_multirole: "CHANGE_ME"
+vault_rbac_pw_nested: "CHANGE_ME"
+vault_rbac_other_client_secret: ""

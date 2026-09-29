@@ -1,0 +1,10 @@
+---
+# Dashboard RBAC test suite (FreeIPA groups -> Keycloak -> dashboard)
+# Runs from the controller against the dashboard/Keycloak HTTP APIs.
+# FreeIPA changes (lifecycle tests) are delegated to rbac_ipa_host and are OFF by default.
+- name: Dashboard RBAC tests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - dashboard_rbac_test

@@ -1,0 +1,47 @@
+---
+- name: Preflight | Required settings are present
+  ansible.builtin.assert:
+    that:
+      - rbac_dashboard_url is match('^https?://')
+      - rbac_keycloak_url is match('^https?://')
+      - rbac_realm | length > 0
+      - rbac_client_id | length > 0
+      - rbac_role_claim in ['client_roles', 'realm_roles', 'groups']
+      - rbac_whoami_path | length > 0
+      - rbac_admin_only_get_path | length > 0
+      - rbac_sysadmin_get_path | length > 0
+      - "(['admin', 'sysadmin', 'business', 'norole'] | difference(rbac_users.keys() | list) | length) == 0"
+    fail_msg: "Fill in group_vars/all/main.yml from the Excel Config sheet first."
+    quiet: true
+
+- name: Preflight | Lifecycle safety — only dedicated test users may be modified
+  ansible.builtin.assert:
+    that:
+      - rbac_ipa_host | length > 0
+      - >-
+        ['sysadmin', 'business'] | map('extract', rbac_users) | map(attribute='username')
+        | reject('match', '^' ~ (rbac_test_user_prefix | regex_escape)) | list | length == 0
+    fail_msg: >-
+      Lifecycle tests change FreeIPA group membership and disable users. They only run against
+      users whose name starts with '{{ rbac_test_user_prefix }}', and need rbac_ipa_host set.
+    quiet: true
+  when: rbac_lifecycle_enabled | bool
+
+- name: Preflight | Warn when write checks are enabled
+  ansible.builtin.debug:
+    msg: >-
+      rbac_allow_write_checks=true: POST/PUT/PATCH/DELETE deny-checks will run. If RBAC is broken
+      these requests WILL change data. Use a test environment or throwaway object IDs.
+  when: rbac_allow_write_checks | bool
+
+- name: Preflight | Keycloak OIDC discovery document
+  ansible.builtin.uri:
+    url: "{{ rbac_keycloak_url }}/realms/{{ rbac_realm }}/.well-known/openid-configuration"
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  register: _rbac_discovery
+
+- name: Preflight | Store Keycloak endpoints
+  ansible.builtin.set_fact:
+    rbac_token_endpoint: "{{ _rbac_discovery.json.token_endpoint }}"
+    rbac_end_session_endpoint: "{{ _rbac_discovery.json.end_session_endpoint }}"

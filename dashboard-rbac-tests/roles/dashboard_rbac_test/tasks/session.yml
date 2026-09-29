@@ -1,0 +1,64 @@
+---
+# RBAC-54: after logout the refresh token must be dead. The old access token usually
+# keeps working until it expires (stateless JWT) — recorded, not failed.
+- name: "RBAC-54 | Fresh Business session"
+  ansible.builtin.uri:
+    url: "{{ rbac_token_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body: "{{ _rbac_token_body }}"
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  vars:
+    _user_key: business
+  register: _e54_tok
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-54 | Log out via Keycloak"
+  ansible.builtin.uri:
+    url: "{{ rbac_end_session_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body: "{{ {'client_id': rbac_client_id, 'refresh_token': _e54_tok.json.refresh_token}
+              | combine({'client_secret': rbac_client_secret} if rbac_client_secret else {}) }}"
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  register: _e54_logout
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-54 | Try to refresh with the logged-out refresh token"
+  ansible.builtin.uri:
+    url: "{{ rbac_token_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body: "{{ _rbac_refresh_body }}"
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  vars:
+    _refresh_token: "{{ _e54_tok.json.refresh_token }}"
+  register: _e54_refresh
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-54 | Replay the old access token"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+    headers:
+      Authorization: "Bearer {{ _e54_tok.json.access_token }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  register: _e54_access
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-54 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-54', 'title': 'Logout ends the Keycloak session',
+           'result': 'Pass' if (_e54_logout.status in [200, 204] and _e54_refresh.status == 400) else 'Fail',
+           'actual': 'logout HTTP ' ~ _e54_logout.status ~ '; refresh after logout HTTP ' ~ _e54_refresh.status
+                     ~ '; old access token HTTP ' ~ _e54_access.status
+                     ~ (' (still valid until expiry)' if _e54_access.status == 200 else '')}] }}

@@ -1,0 +1,29 @@
+---
+- name: Report | Results directory exists
+  ansible.builtin.file:
+    path: "{{ rbac_results_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Report | Write CSV (paste Result/Actual into the Excel Test Cases sheet)
+  ansible.builtin.template:
+    src: rbac_results.csv.j2
+    dest: "{{ rbac_results_dir }}/rbac_results_{{ rbac_run_ts }}.csv"
+    mode: "0640"
+
+- name: Report | Summary
+  ansible.builtin.debug:
+    msg:
+      - "Results file: {{ rbac_results_dir }}/rbac_results_{{ rbac_run_ts }}.csv"
+      - "Pass={{ _c.Pass | default(0) }}  Fail={{ _c.Fail | default(0) }}  Blocked={{ _c.Blocked | default(0) }}  N/A={{ _c['N/A'] | default(0) }}"
+      - "Failed: {{ rbac_results | selectattr('result', 'equalto', 'Fail') | map(attribute='id') | unique | join(', ') | default('none', true) }}"
+      - "Manual in Excel: RBAC-20..24 (UI), RBAC-30..32, RBAC-53, RBAC-55, RBAC-60, RBAC-61, RBAC-63, plus effective behaviour of RBAC-05"
+  vars:
+    _c: "{{ dict(rbac_results | groupby('result') | map('first') | zip(rbac_results | groupby('result') | map('last') | map('length'))) }}"
+
+- name: Report | Fail the run if any test failed
+  ansible.builtin.assert:
+    that: rbac_results | selectattr('result', 'equalto', 'Fail') | list | length == 0
+    fail_msg: "RBAC findings present — see the results CSV."
+    quiet: true
+  when: rbac_fail_on_findings | bool

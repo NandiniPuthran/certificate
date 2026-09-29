@@ -1,0 +1,118 @@
+---
+# Forged tokens are built from the genuine Business token with the Administrator role injected.
+- name: "RBAC-45/46 | Build forged tokens"
+  ansible.builtin.set_fact:
+    _rbac_forged_tampered: "{{ _parts[0] ~ '.' ~ _rbac_b64url_escalated ~ '.' ~ _parts[2] }}"
+    _rbac_forged_none: "{{ _none_hdr ~ '.' ~ _rbac_b64url_escalated ~ '.' }}"
+  vars:
+    _jwt: "{{ rbac_tokens.business.access_token }}"
+    _parts: "{{ _jwt.split('.') }}"
+    _none_hdr: >-
+      {{ {'alg': 'none', 'typ': 'JWT'} | to_json | b64encode
+         | replace('+', '-') | replace('/', '_') | regex_replace('=+$', '') }}
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-45/46 | Call the Administrator-only endpoint with genuine and forged tokens"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_admin_only_get_path }}"
+    headers:
+      Authorization: "Bearer {{ item.token }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  loop:
+    - { name: admin_genuine,    token: "{{ rbac_tokens.admin.access_token }}" }
+    - { name: business_genuine, token: "{{ rbac_tokens.business.access_token }}" }
+    - { name: tampered,         token: "{{ _rbac_forged_tampered }}" }
+    - { name: alg_none,         token: "{{ _rbac_forged_none }}" }
+  register: _d_forge
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-45/46 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [
+           {'id': 'RBAC-45', 'title': 'Tampered token signature is rejected',
+            'result': 'Blocked' if not (_probe_valid | bool) else ('Pass' if _s.tampered in [401, 403] else 'Fail'),
+            'actual': _baseline ~ '; tampered -> HTTP ' ~ _s.tampered},
+           {'id': 'RBAC-46', 'title': 'Unsigned (alg=none) token is rejected',
+            'result': 'Blocked' if not (_probe_valid | bool) else ('Pass' if _s.alg_none in [401, 403] else 'Fail'),
+            'actual': _baseline ~ '; alg=none -> HTTP ' ~ _s.alg_none}] }}
+  vars:
+    _s: "{{ dict(_d_forge.results | map(attribute='item') | map(attribute='name') | zip(_d_forge.results | map(attribute='status'))) }}"
+    # The probe is only meaningful if Admin gets in and genuine Business does not
+    _probe_valid: "{{ (_s.admin_genuine >= 200 and _s.admin_genuine < 300) and _s.business_genuine in rbac_deny_status }}"
+    _baseline: "baseline admin={{ _s.admin_genuine }} business={{ _s.business_genuine }}"
+
+# ---------------- RBAC-47 ----------------
+- name: "RBAC-47 | Get a Business token issued to another client"
+  ansible.builtin.uri:
+    url: "{{ rbac_token_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body: "{{ _rbac_token_body }}"
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  vars:
+    _user_key: business
+    _client_id: "{{ rbac_other_client_id }}"
+    _client_secret: "{{ rbac_other_client_secret }}"
+  register: _d47_tok
+  failed_when: false
+  when: rbac_other_client_id | length > 0
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-47 | Call the dashboard with the foreign token"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+    headers:
+      Authorization: "Bearer {{ _d47_tok.json.access_token }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  register: _d47
+  failed_when: false
+  when: _d47_tok is not skipped and _d47_tok.status == 200
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-47 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-47', 'title': 'Token issued for another client is rejected',
+           'result': 'Blocked' if _d47 is skipped else ('Pass' if _d47.status in rbac_deny_status else 'Fail'),
+           'actual': ('could not obtain foreign token (HTTP ' ~ _d47_tok.status ~ ')') if _d47 is skipped
+                     else 'foreign-client token -> HTTP ' ~ _d47.status}] }}
+  when: rbac_other_client_id | length > 0
+
+# ---------------- RBAC-48 ----------------
+- name: "RBAC-48 | Wait until the Business token has expired"
+  ansible.builtin.pause:
+    seconds: "{{ [(_exp | int) - (_rbac_now | int) + 10, 1] | max }}"
+  vars:
+    _jwt: "{{ rbac_tokens.business.access_token }}"
+    _exp: "{{ _rbac_jwt_claims.exp }}"
+  when: rbac_expired_token_test | bool
+
+- name: "RBAC-48 | Replay the expired token"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+    headers:
+      Authorization: "Bearer {{ rbac_tokens.business.access_token }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  register: _d48
+  failed_when: false
+  when: rbac_expired_token_test | bool
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-48 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-48', 'title': 'Expired token is rejected',
+           'result': 'Pass' if _d48.status == 401 else 'Fail',
+           'actual': 'expired token -> HTTP ' ~ _d48.status}] }}
+  when: rbac_expired_token_test | bool

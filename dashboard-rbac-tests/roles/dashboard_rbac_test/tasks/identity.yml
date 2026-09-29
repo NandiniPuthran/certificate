@@ -1,0 +1,175 @@
+---
+- name: "A | Decode dashboard roles carried by each token"
+  ansible.builtin.set_fact:
+    rbac_token_roles: "{{ rbac_token_roles | default({}) | combine({item.key: _rbac_dashboard_roles_in_jwt}) }}"
+  vars:
+    _jwt: "{{ item.value.access_token | default('') }}"
+  loop: "{{ rbac_tokens | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: "A | Dashboard roles per test user"
+  ansible.builtin.debug:
+    var: rbac_token_roles
+
+# ---------------- RBAC-01..03 ----------------
+- name: "RBAC-01..03 | Each role reaches the dashboard API"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+    headers:
+      Authorization: "Bearer {{ rbac_tokens[item].access_token }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  loop: [admin, sysadmin, business]
+  register: _a_login
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-01..03 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': _ids[item.item],
+           'title': rbac_roles[item.item] ~ ' login maps to exactly that role',
+           'result': 'Pass' if (item.status == 200 and rbac_token_roles[item.item] == [rbac_roles[item.item]]) else 'Fail',
+           'actual': 'API HTTP ' ~ item.status ~ '; token roles=[' ~ (rbac_token_roles[item.item] | join(', ')) ~ ']'}] }}
+  vars:
+    _ids: { admin: RBAC-01, sysadmin: RBAC-02, business: RBAC-03 }
+  loop: "{{ _a_login.results }}"
+  loop_control:
+    label: "{{ _ids[item.item] }}"
+
+# ---------------- RBAC-04 ----------------
+- name: "RBAC-04 | No-role user calls the dashboard API"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+    headers:
+      Authorization: "Bearer {{ rbac_tokens.norole.access_token }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  register: _a04
+  failed_when: false
+  when: rbac_tokens.norole.access_token is defined
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-04 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-04',
+           'title': 'Valid FreeIPA user with no dashboard group is denied',
+           'result': 'Pass' if (_a04 is skipped or (_a04.status in rbac_deny_status and rbac_token_roles.norole | length == 0)) else 'Fail',
+           'actual': ('Keycloak refused login (HTTP ' ~ rbac_token_status.norole ~ ')') if _a04 is skipped
+                     else ('API HTTP ' ~ _a04.status ~ '; token roles=[' ~ (rbac_token_roles.norole | join(', ')) ~ ']')}] }}
+
+# ---------------- RBAC-05 ----------------
+- name: "RBAC-05 | Record multi-role token content"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-05',
+           'title': 'Multi-role user carries both roles (effective behaviour: verify manually)',
+           'result': 'Pass' if (rbac_roles.business in _r and rbac_roles.sysadmin in _r) else 'Fail',
+           'actual': 'token roles=[' ~ (_r | join(', ')) ~ ']'}] }}
+  vars:
+    _r: "{{ rbac_token_roles.multirole | default([]) }}"
+  when: "'multirole' in rbac_users"
+
+# ---------------- RBAC-06 ----------------
+- name: "RBAC-06 | Record nested-group result"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-06',
+           'title': 'Nested FreeIPA group gives the designed role',
+           'result': 'Pass' if (_r | sort) == (_expected | sort) else 'Fail',
+           'actual': 'expected=[' ~ (_expected | join(', ')) ~ '] got=[' ~ (_r | join(', ')) ~ ']'}] }}
+  vars:
+    _r: "{{ rbac_token_roles.nested | default([]) }}"
+    _expected: "{{ [] if rbac_nested_expected_role == 'none' else [rbac_roles[rbac_nested_expected_role]] }}"
+  when: "'nested' in rbac_users"
+
+# ---------------- RBAC-07 ----------------
+- name: "RBAC-07 | Record token audience / authorised party"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-07',
+           'title': 'Token is bound to the dashboard client',
+           'result': 'Pass' if (_azp == rbac_client_id and (not (rbac_require_aud | bool) or rbac_client_id in _aud)) else 'Fail',
+           'actual': 'azp=' ~ _azp ~ '; aud=[' ~ (_aud | join(', ')) ~ ']'}] }}
+  vars:
+    _jwt: "{{ rbac_tokens.admin.access_token }}"
+    _azp: "{{ _rbac_jwt_claims.azp | default('') }}"
+    _aud: "{{ [_rbac_jwt_claims.aud] if _rbac_jwt_claims.aud is string else (_rbac_jwt_claims.aud | default([])) }}"
+
+# ---------------- RBAC-08 ----------------
+# One attempt only, to stay well below FreeIPA / Keycloak lockout thresholds.
+- name: "RBAC-08 | Login with a wrong password"
+  ansible.builtin.uri:
+    url: "{{ rbac_token_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body: "{{ _rbac_token_body }}"
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  vars:
+    _user_key: business
+    _password: "rbac-wrong-{{ 999999 | random }}"
+  register: _a08
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-08 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-08',
+           'title': 'Wrong password is rejected by Keycloak',
+           'result': 'Pass' if _a08.status in [400, 401] else 'Fail',
+           'actual': 'token endpoint HTTP ' ~ _a08.status}] }}
+
+# ---------------- RBAC-10 ----------------
+- name: "RBAC-10 | Probe for a local (non-Keycloak) login page"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ item }}"
+    follow_redirects: none
+    return_content: true
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  loop: "{{ rbac_local_login_paths }}"
+  register: _a10_login
+  failed_when: false
+
+- name: "RBAC-10 | Try default credentials with HTTP basic auth on the API"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+    url_username: "{{ item.username }}"
+    url_password: "{{ item.password }}"
+    force_basic_auth: true
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  loop: "{{ rbac_default_creds }}"
+  register: _a10_basic
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "RBAC-10 | Record"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': 'RBAC-10',
+           'title': 'No authentication path around Keycloak',
+           'result': 'Pass' if (_bad_login | length == 0 and _bad_basic | length == 0) else 'Fail',
+           'actual': 'local login forms served at: [' ~ (_bad_login | join(', ')) ~ ']; basic-auth accepted for: ['
+                     ~ (_bad_basic | join(', ')) ~ ']'}] }}
+  vars:
+    _bad_login: >-
+      {{ _a10_login.results | selectattr('status', 'equalto', 200) | selectattr('content', 'defined')
+         | selectattr('content', 'search', rbac_local_login_marker | regex_escape) | map(attribute='item') | list }}
+    _bad_basic: >-
+      {{ _a10_basic.results | rejectattr('status', 'in', rbac_deny_status + [301, 302, 303, 307, 308])
+         | map(attribute='item') | map(attribute='username') | list }}

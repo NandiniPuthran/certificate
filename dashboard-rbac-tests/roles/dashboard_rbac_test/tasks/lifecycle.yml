@@ -1,0 +1,309 @@
+---
+# Group E: changes FreeIPA state. Every change is reverted in an 'always' section,
+# and every test checks its precondition first so the revert cannot remove access
+# that existed before the test.
+#
+# Timings measured from the FreeIPA change:
+#   "new logins"  -> how fast Keycloak sees the FreeIPA change (LDAP federation cache)
+#   "old token"   -> how long an already-issued token keeps working (token lifespan)
+
+- name: "E | Obtain Kerberos ticket from keytab"
+  ansible.builtin.command: kinit -kt {{ rbac_ipa_keytab | quote }} {{ rbac_ipa_principal | quote }}
+  delegate_to: "{{ rbac_ipa_host }}"
+  changed_when: false
+  when: rbac_ipa_keytab | length > 0
+
+- name: "E | Verify a valid Kerberos ticket exists on the IPA host"
+  ansible.builtin.command: klist -s
+  delegate_to: "{{ rbac_ipa_host }}"
+  changed_when: false
+
+# ======================= RBAC-50: role removed while logged in =======================
+- name: "RBAC-50 | Precondition: SysAdmin test user is a direct group member"
+  ansible.builtin.command: ipa group-show {{ rbac_ipa_groups.sysadmin | quote }} --raw
+  delegate_to: "{{ rbac_ipa_host }}"
+  register: _e50_pre
+  changed_when: false
+
+- name: "RBAC-50 | Assert precondition"
+  ansible.builtin.assert:
+    that: ("uid=" ~ rbac_users.sysadmin.username ~ ",") in _e50_pre.stdout
+    fail_msg: "{{ rbac_users.sysadmin.username }} is not a direct member of {{ rbac_ipa_groups.sysadmin }}; refusing to run RBAC-50."
+    quiet: true
+
+- name: "RBAC-50 | Remove role and measure revocation"
+  block:
+    - name: "RBAC-50 | Fresh SysAdmin token"
+      ansible.builtin.uri:
+        url: "{{ rbac_token_endpoint }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _rbac_token_body }}"
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      vars:
+        _user_key: sysadmin
+      register: _e50_tok
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-50 | Start clock"
+      ansible.builtin.set_fact:
+        _e50_t0: "{{ _rbac_now }}"
+
+    - name: "RBAC-50 | Remove user from the SysAdmin FreeIPA group"
+      ansible.builtin.command: >-
+        ipa group-remove-member {{ rbac_ipa_groups.sysadmin | quote }}
+        --users={{ rbac_users.sysadmin.username | quote }}
+      delegate_to: "{{ rbac_ipa_host }}"
+
+    - name: "RBAC-50 | Poll new logins until the role disappears"
+      ansible.builtin.uri:
+        url: "{{ rbac_token_endpoint }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _rbac_token_body }}"
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      vars:
+        _user_key: sysadmin
+        _jwt: "{{ _e50_new.json.access_token | default('') }}"
+      register: _e50_new
+      until: _e50_new.status != 200 or rbac_roles.sysadmin not in _rbac_roles_in_jwt
+      retries: "{{ _rbac_poll_retries }}"
+      delay: "{{ rbac_poll_interval }}"
+      failed_when: false
+      ignore_errors: true
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-50 | Clock: new logins"
+      ansible.builtin.set_fact:
+        _e50_t_new: "{{ _rbac_now }}"
+
+    - name: "RBAC-50 | Poll the old token on a SysAdmin endpoint until denied"
+      ansible.builtin.uri:
+        url: "{{ rbac_dashboard_url }}{{ rbac_sysadmin_get_path }}"
+        headers:
+          Authorization: "Bearer {{ _e50_tok.json.access_token }}"
+        follow_redirects: none
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      register: _e50_old
+      until: _e50_old.status in rbac_deny_status
+      retries: "{{ _rbac_poll_retries }}"
+      delay: "{{ rbac_poll_interval }}"
+      failed_when: false
+      ignore_errors: true
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-50 | Record"
+      ansible.builtin.set_fact:
+        rbac_results: >-
+          {{ rbac_results + [{
+               'id': 'RBAC-50', 'title': 'Role removed in FreeIPA stops working within SLA',
+               'result': 'Pass' if ((_old_denied | bool) and (_old_secs | int) <= (rbac_revocation_sla_seconds | int)) else 'Fail',
+               'actual': 'old token denied: ' ~ (_old_secs ~ 's' if (_old_denied | bool) else 'NOT within ' ~ rbac_poll_max_seconds ~ 's')
+                         ~ '; new logins lost role: ' ~ (_new_secs ~ 's' if (_new_gone | bool) else 'NOT within ' ~ rbac_poll_max_seconds ~ 's')
+                         ~ '; SLA ' ~ rbac_revocation_sla_seconds ~ 's'}] }}
+      vars:
+        _old_denied: "{{ _e50_old.status in rbac_deny_status }}"
+        _old_secs: "{{ (_rbac_now | int) - (_e50_t0 | int) }}"
+        _new_gone: "{{ _e50_new.status != 200 or rbac_roles.sysadmin not in _rbac_roles_in_jwt }}"
+        _new_secs: "{{ (_e50_t_new | int) - (_e50_t0 | int) }}"
+        _jwt: "{{ _e50_new.json.access_token | default('') }}"
+
+  always:
+    - name: "RBAC-50 | Revert: restore group membership"
+      ansible.builtin.command: >-
+        ipa group-add-member {{ rbac_ipa_groups.sysadmin | quote }}
+        --users={{ rbac_users.sysadmin.username | quote }}
+      delegate_to: "{{ rbac_ipa_host }}"
+      register: _e50_revert
+      changed_when: _e50_revert.rc == 0
+      failed_when: _e50_revert.rc not in [0, 1]    # 1 = already a member
+
+# ======================= RBAC-51: role added =======================
+- name: "RBAC-51 | Precondition: Business test user is NOT in the SysAdmin group"
+  ansible.builtin.command: ipa group-show {{ rbac_ipa_groups.sysadmin | quote }} --raw
+  delegate_to: "{{ rbac_ipa_host }}"
+  register: _e51_pre
+  changed_when: false
+
+- name: "RBAC-51 | Assert precondition"
+  ansible.builtin.assert:
+    that: ("uid=" ~ rbac_users.business.username ~ ",") not in _e51_pre.stdout
+    fail_msg: "{{ rbac_users.business.username }} is already in {{ rbac_ipa_groups.sysadmin }}; refusing to run RBAC-51."
+    quiet: true
+
+- name: "RBAC-51 | Add role and measure propagation"
+  block:
+    - name: "RBAC-51 | Start clock"
+      ansible.builtin.set_fact:
+        _e51_t0: "{{ _rbac_now }}"
+
+    - name: "RBAC-51 | Add Business user to the SysAdmin FreeIPA group"
+      ansible.builtin.command: >-
+        ipa group-add-member {{ rbac_ipa_groups.sysadmin | quote }}
+        --users={{ rbac_users.business.username | quote }}
+      delegate_to: "{{ rbac_ipa_host }}"
+
+    - name: "RBAC-51 | Poll new logins until the role appears"
+      ansible.builtin.uri:
+        url: "{{ rbac_token_endpoint }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _rbac_token_body }}"
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      vars:
+        _user_key: business
+        _jwt: "{{ _e51_new.json.access_token | default('') }}"
+      register: _e51_new
+      until: _e51_new.status == 200 and rbac_roles.sysadmin in _rbac_roles_in_jwt
+      retries: "{{ _rbac_poll_retries }}"
+      delay: "{{ rbac_poll_interval }}"
+      failed_when: false
+      ignore_errors: true
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-51 | Record"
+      ansible.builtin.set_fact:
+        rbac_results: >-
+          {{ rbac_results + [{
+               'id': 'RBAC-51', 'title': 'Role added in FreeIPA appears on new login',
+               'result': 'Pass' if (_added | bool) else 'Fail',
+               'actual': 'role on new login after ' ~ _secs ~ 's' if (_added | bool)
+                         else 'role NOT present within ' ~ rbac_poll_max_seconds ~ 's'}] }}
+      vars:
+        _jwt: "{{ _e51_new.json.access_token | default('') }}"
+        _added: "{{ _e51_new.status == 200 and rbac_roles.sysadmin in _rbac_roles_in_jwt }}"
+        _secs: "{{ (_rbac_now | int) - (_e51_t0 | int) }}"
+
+  always:
+    - name: "RBAC-51 | Revert: remove the temporary membership"
+      ansible.builtin.command: >-
+        ipa group-remove-member {{ rbac_ipa_groups.sysadmin | quote }}
+        --users={{ rbac_users.business.username | quote }}
+      delegate_to: "{{ rbac_ipa_host }}"
+      register: _e51_revert
+      changed_when: _e51_revert.rc == 0
+      failed_when: _e51_revert.rc not in [0, 1]    # 1 = not a member
+
+# ======================= RBAC-09 + RBAC-52: user disabled =======================
+- name: "RBAC-52 | Precondition: Business test user is enabled"
+  ansible.builtin.command: ipa user-show {{ rbac_users.business.username | quote }}
+  delegate_to: "{{ rbac_ipa_host }}"
+  register: _e52_pre
+  changed_when: false
+
+- name: "RBAC-52 | Assert precondition"
+  ansible.builtin.assert:
+    that: _e52_pre.stdout is search('Account disabled:\s*False')
+    fail_msg: "{{ rbac_users.business.username }} is already disabled; refusing to run RBAC-09/52."
+    quiet: true
+
+- name: "RBAC-09/52 | Disable user and measure"
+  block:
+    - name: "RBAC-52 | Fresh Business session (access + refresh token)"
+      ansible.builtin.uri:
+        url: "{{ rbac_token_endpoint }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _rbac_token_body }}"
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      vars:
+        _user_key: business
+      register: _e52_tok
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-52 | Start clock"
+      ansible.builtin.set_fact:
+        _e52_t0: "{{ _rbac_now }}"
+
+    - name: "RBAC-52 | Disable the user in FreeIPA"
+      ansible.builtin.command: ipa user-disable {{ rbac_users.business.username | quote }}
+      delegate_to: "{{ rbac_ipa_host }}"
+
+    - name: "RBAC-09 | New login attempt for the disabled user"
+      ansible.builtin.uri:
+        url: "{{ rbac_token_endpoint }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _rbac_token_body }}"
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      vars:
+        _user_key: business
+      register: _e09
+      failed_when: false
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-09 | Record"
+      ansible.builtin.set_fact:
+        rbac_results: >-
+          {{ rbac_results + [{
+               'id': 'RBAC-09', 'title': 'FreeIPA-disabled user cannot log in',
+               'result': 'Pass' if _e09.status in [400, 401] else 'Fail',
+               'actual': 'login after disable -> HTTP ' ~ _e09.status}] }}
+
+    # Note: if the realm has "Revoke Refresh Token" enabled, reusing one refresh token
+    # fails after the first use regardless of FreeIPA — then ignore this timing.
+    - name: "RBAC-52 | Poll refresh with the existing refresh token until refused"
+      ansible.builtin.uri:
+        url: "{{ rbac_token_endpoint }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _rbac_refresh_body }}"
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      vars:
+        _refresh_token: "{{ _e52_tok.json.refresh_token }}"
+      register: _e52_refresh
+      until: _e52_refresh.status != 200
+      retries: "{{ _rbac_poll_retries }}"
+      delay: "{{ rbac_poll_interval }}"
+      failed_when: false
+      ignore_errors: true
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-52 | Clock: refresh"
+      ansible.builtin.set_fact:
+        _e52_t_refresh: "{{ _rbac_now }}"
+
+    - name: "RBAC-52 | Poll the old access token until denied"
+      ansible.builtin.uri:
+        url: "{{ rbac_dashboard_url }}{{ rbac_whoami_path }}"
+        headers:
+          Authorization: "Bearer {{ _e52_tok.json.access_token }}"
+        follow_redirects: none
+        validate_certs: "{{ rbac_validate_certs }}"
+        ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+      register: _e52_old
+      until: _e52_old.status in rbac_deny_status
+      retries: "{{ _rbac_poll_retries }}"
+      delay: "{{ rbac_poll_interval }}"
+      failed_when: false
+      ignore_errors: true
+      no_log: "{{ rbac_no_log }}"
+
+    - name: "RBAC-52 | Record"
+      ansible.builtin.set_fact:
+        rbac_results: >-
+          {{ rbac_results + [{
+               'id': 'RBAC-52', 'title': 'Disabled user loses an active session within SLA',
+               'result': 'Pass' if ((_old_denied | bool) and (_old_secs | int) <= (rbac_revocation_sla_seconds | int)) else 'Fail',
+               'actual': 'old access token denied: ' ~ (_old_secs ~ 's' if (_old_denied | bool) else 'NOT within ' ~ rbac_poll_max_seconds ~ 's')
+                         ~ '; refresh refused: ' ~ (_ref_secs ~ 's' if _e52_refresh.status != 200 else 'NOT within ' ~ rbac_poll_max_seconds ~ 's')
+                         ~ '; SLA ' ~ rbac_revocation_sla_seconds ~ 's'}] }}
+      vars:
+        _old_denied: "{{ _e52_old.status in rbac_deny_status }}"
+        _old_secs: "{{ (_rbac_now | int) - (_e52_t0 | int) }}"
+        _ref_secs: "{{ (_e52_t_refresh | int) - (_e52_t0 | int) }}"
+
+  always:
+    - name: "RBAC-52 | Revert: re-enable the user"
+      ansible.builtin.command: ipa user-enable {{ rbac_users.business.username | quote }}
+      delegate_to: "{{ rbac_ipa_host }}"
+      register: _e52_revert
+      changed_when: _e52_revert.rc == 0
+      failed_when: _e52_revert.rc not in [0, 1]    # 1 = already enabled

@@ -1,0 +1,42 @@
+---
+- name: Init | Result list and run timestamp
+  ansible.builtin.set_fact:
+    rbac_results: []
+    rbac_run_ts: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+  tags: [always]
+
+- name: Run test phases (report is written even if a phase errors out)
+  block:
+    - name: Preflight checks
+      ansible.builtin.import_tasks: preflight.yml
+      tags: [always]
+
+    - name: Obtain tokens and verify bearer auth works
+      ansible.builtin.import_tasks: tokens.yml
+      tags: [always]
+
+    - name: "Group A | Identity and role mapping"
+      ansible.builtin.import_tasks: identity.yml
+      tags: [identity, group_a]
+
+    - name: "Group B/D | API allow and deny checks"
+      ansible.builtin.import_tasks: enforcement.yml
+      tags: [enforcement, group_d]
+
+    - name: "Group D | Forged, foreign and expired tokens"
+      ansible.builtin.import_tasks: token_attacks.yml
+      tags: [token_attacks, group_d]
+
+    - name: "Group E | Logout behaviour"
+      ansible.builtin.import_tasks: session.yml
+      tags: [session, group_e]
+
+    - name: "Group E | FreeIPA-driven lifecycle (modifies FreeIPA, opt-in)"
+      ansible.builtin.import_tasks: lifecycle.yml
+      when: rbac_lifecycle_enabled | bool
+      tags: [lifecycle, group_e]
+
+  always:
+    - name: Write results report
+      ansible.builtin.import_tasks: report.yml
+      tags: [always]

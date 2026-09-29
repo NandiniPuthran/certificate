@@ -1,0 +1,4 @@
+ID,Title,Result,Actual,Run
+{% for r in rbac_results %}
+"{{ r.id }}","{{ r.title | replace('"', '""') }}","{{ r.result }}","{{ r.actual | replace('"', '""') }}","{{ rbac_run_ts }}"
+{% endfor %}

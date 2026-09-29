@@ -1,0 +1,76 @@
+---
+# ---------------------------------------------------------------------------
+# Environment values — copy them from the "Config" sheet of the Excel workbook.
+# Everything marked EXAMPLE must be replaced with your real values.
+# ---------------------------------------------------------------------------
+rbac_dashboard_url: "https://dashboard.example.internal"        # EXAMPLE
+rbac_keycloak_url: "https://sso.example.internal"               # EXAMPLE
+rbac_realm: "example"                                           # EXAMPLE
+rbac_client_id: "dashboard"                                     # EXAMPLE
+rbac_client_secret: "{{ vault_rbac_client_secret | default('') }}"  # only for confidential clients
+
+# Where the role shows up in the access token:
+#   client_roles -> resource_access.<client_id>.roles
+#   realm_roles  -> realm_access.roles
+#   groups       -> groups claim (then rbac_roles values must be the FreeIPA group names)
+rbac_role_claim: client_roles
+
+rbac_roles:
+  admin: "Administrator"                  # EXAMPLE — exact role name in the token
+  sysadmin: "System Administrator"        # EXAMPLE
+  business: "Business"                    # EXAMPLE
+
+rbac_ipa_groups:
+  admin: dash-admins                      # EXAMPLE
+  sysadmin: dash-sysadmins                # EXAMPLE
+  business: dash-business                 # EXAMPLE
+
+# Passwords live in group_vars/all/vault.yml (ansible-vault encrypted)
+rbac_users:
+  admin:     { username: t_admin,     password: "{{ vault_rbac_pw_admin }}" }
+  sysadmin:  { username: t_sysadmin,  password: "{{ vault_rbac_pw_sysadmin }}" }
+  business:  { username: t_business,  password: "{{ vault_rbac_pw_business }}" }
+  norole:    { username: t_norole,    password: "{{ vault_rbac_pw_norole }}" }
+  multirole: { username: t_multirole, password: "{{ vault_rbac_pw_multirole }}" }   # optional — remove if not created
+  nested:    { username: t_nested,    password: "{{ vault_rbac_pw_nested }}" }      # optional — remove if not created
+
+# RBAC-06: which role a nested-group member SHOULD get (a key of rbac_roles, or 'none')
+rbac_nested_expected_role: sysadmin
+
+# ---- Dashboard endpoints (EXAMPLES — take the real ones from the browser's network tab) ----
+rbac_whoami_path: "/api/user"                    # GET that any authorised user may call
+rbac_admin_only_get_path: "/api/admin/users"     # GET only Administrator may call (token-attack probe)
+rbac_sysadmin_get_path: "/api/datasources"       # GET Admin+SysAdmin may call, Business may not (lifecycle probe)
+
+# Positive controls: prove the endpoints used below really work for the allowed role.
+# Without these, a 403 might just mean "wrong path", not "RBAC works".
+rbac_api_allow_checks:
+  - { id: RBAC-20, user: admin,    method: GET, path: "/api/admin/users",   desc: "Admin can list users" }
+  - { id: RBAC-22, user: sysadmin, method: GET, path: "/api/datasources",   desc: "SysAdmin can list data sources" }
+  - { id: RBAC-24, user: business, method: GET, path: "/api/dashboards",    desc: "Business can list dashboards" }
+
+# Negative checks (group D + RBAC-62). Derived from the confirmed Permission Matrix.
+# Write methods (POST/PUT/PATCH/DELETE) are skipped unless rbac_allow_write_checks=true.
+rbac_api_deny_checks:
+  - { id: RBAC-40, user: business, method: GET,    path: "/api/admin/settings",        desc: "Business reads settings" }
+  - { id: RBAC-40, user: business, method: GET,    path: "/api/datasources",           desc: "Business lists data sources" }
+  - { id: RBAC-41, user: business, method: POST,   path: "/api/dashboards",            desc: "Business creates dashboard",
+      body: { title: "rbac-test-should-be-denied" } }
+  - { id: RBAC-41, user: business, method: DELETE, path: "/api/dashboards/REPLACE-ID", desc: "Business deletes dashboard" }
+  - { id: RBAC-42, user: sysadmin, method: GET,    path: "/api/admin/users",           desc: "SysAdmin lists users" }
+  - { id: RBAC-42, user: sysadmin, method: POST,   path: "/api/admin/users",           desc: "SysAdmin creates user",
+      body: { username: "rbac-test-should-be-denied" } }
+  - { id: RBAC-43, user: sysadmin, method: PUT,    path: "/api/admin/users/t_sysadmin/role", desc: "SysAdmin self-escalates",
+      body: { role: "Administrator" } }
+  - { id: RBAC-44, user: business, method: GET,    path: "/api/dashboards/OUT-OF-SCOPE-ID", desc: "Business IDOR on dashboard" }
+  - { id: RBAC-62, user: sysadmin, method: DELETE, path: "/api/audit/REPLACE-ID",      desc: "SysAdmin deletes audit entry" }
+
+# RBAC-10: auth bypass probes
+rbac_local_login_paths: ["/login", "/admin/login"]   # EXAMPLE
+rbac_local_login_marker: 'type="password"'           # text that would indicate a local login form
+rbac_default_creds:
+  - { username: admin, password: admin }             # the product's documented default(s)
+
+# RBAC-47: another client in the same realm (leave empty to skip)
+rbac_other_client_id: ""
+rbac_other_client_secret: "{{ vault_rbac_other_client_secret | default('') }}"

@@ -1,0 +1,31 @@
+---
+# TLS: your internal CA (FreeIPA CA by default)
+rbac_validate_certs: true
+rbac_ca_path: /etc/ipa/ca.crt
+
+# Status codes that count as "denied"
+rbac_deny_status: [401, 403, 404]
+
+# Safety switches — both OFF by default
+rbac_allow_write_checks: false      # run POST/PUT/PATCH/DELETE deny-checks (if RBAC is broken they WILL change data)
+rbac_lifecycle_enabled: false       # group E: modifies FreeIPA group membership and disables/enables users
+
+# RBAC-07: also require the dashboard client in the token's aud claim
+rbac_require_aud: false
+
+# RBAC-48: wait for the business token to expire and replay it
+rbac_expired_token_test: false
+
+# Lifecycle (group E)
+rbac_ipa_host: "{{ groups['ipa'][0] | default('') }}"
+rbac_ipa_keytab: ""                 # optional: kinit -kt <keytab> <principal> before ipa commands
+rbac_ipa_principal: ""
+rbac_test_user_prefix: "t_"         # lifecycle tests refuse to touch users without this prefix
+rbac_poll_interval: 15              # seconds between polls
+rbac_poll_max_seconds: 900          # give up polling after this
+rbac_revocation_sla_seconds: 360    # pass/fail threshold for RBAC-50/52 (≈ access token lifespan + margin)
+
+# Reporting
+rbac_results_dir: "{{ playbook_dir }}/results"
+rbac_fail_on_findings: true         # fail the play at the end if any test failed
+rbac_no_log: true                   # hide passwords/tokens in output; set false only for debugging

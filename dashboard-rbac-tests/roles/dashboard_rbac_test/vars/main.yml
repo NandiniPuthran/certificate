@@ -1,0 +1,50 @@
+---
+# Lazy helpers. Set _jwt (a raw access token) in task vars, then reference these.
+
+# Decoded JWT payload. Appending '==' is safe: base64 decoding ignores surplus padding.
+_rbac_jwt_claims: >-
+  {{ {} if not (_jwt | default('')) else
+     (((_jwt.split('.')[1] | replace('-', '+') | replace('_', '/')) ~ '==') | b64decode | from_json) }}
+
+# Roles carried by the token, according to rbac_role_claim
+_rbac_roles_in_jwt: >-
+  {{ ((_rbac_jwt_claims.resource_access | default({})).get(rbac_client_id, {}).roles | default([]))
+     if rbac_role_claim == 'client_roles' else
+     ((_rbac_jwt_claims.realm_access | default({})).roles | default([]))
+     if rbac_role_claim == 'realm_roles' else
+     (_rbac_jwt_claims.groups | default([]) | map('regex_replace', '^.*/', '') | list) }}
+
+# Only the three dashboard roles (ignores default realm roles such as offline_access)
+_rbac_dashboard_roles_in_jwt: "{{ _rbac_roles_in_jwt | intersect(rbac_roles.values() | list) }}"
+
+# Same payload with the Administrator role injected (for tamper / alg=none tests)
+_rbac_escalated_payload: >-
+  {{ _rbac_jwt_claims | combine(
+       {'resource_access': {rbac_client_id: {'roles': [rbac_roles.admin]}}} if rbac_role_claim == 'client_roles' else
+       {'realm_access': {'roles': [rbac_roles.admin]}} if rbac_role_claim == 'realm_roles' else
+       {'groups': ['/' ~ rbac_roles.admin]},
+       recursive=true) }}
+
+_rbac_b64url_escalated: >-
+  {{ _rbac_escalated_payload | to_json | b64encode
+     | replace('+', '-') | replace('/', '_') | regex_replace('=+$', '') }}
+
+# Password-grant body for rbac_users[_user_key]; override client with _client_id/_client_secret
+_rbac_token_body: >-
+  {{ {'grant_type': 'password',
+      'client_id': _client_id | default(rbac_client_id),
+      'username': rbac_users[_user_key].username,
+      'password': _password | default(rbac_users[_user_key].password),
+      'scope': 'openid'}
+     | combine({'client_secret': _client_secret | default(rbac_client_secret)}
+               if (_client_secret | default(rbac_client_secret)) else {}) }}
+
+# Refresh-grant body for the refresh token in _refresh_token
+_rbac_refresh_body: >-
+  {{ {'grant_type': 'refresh_token', 'client_id': rbac_client_id, 'refresh_token': _refresh_token}
+     | combine({'client_secret': rbac_client_secret} if rbac_client_secret else {}) }}
+
+_rbac_poll_retries: "{{ (rbac_poll_max_seconds | int) // (rbac_poll_interval | int) }}"
+
+# Current epoch seconds (controller clock, timezone-safe)
+_rbac_now: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"

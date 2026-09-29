@@ -1,0 +1,66 @@
+---
+# Positive controls first: they prove the paths used in the deny-checks are real,
+# so a later 403/404 means "RBAC denied it", not "wrong URL".
+- name: "B | Allowed API calls succeed for the permitted role"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ item.path }}"
+    method: "{{ item.method | default('GET') | upper }}"
+    headers:
+      Authorization: "Bearer {{ rbac_tokens[item.user].access_token }}"
+    body_format: json
+    body: "{{ item.body | default(omit) }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  loop: "{{ rbac_api_allow_checks }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.user }} {{ item.method | default('GET') }} {{ item.path }}"
+  when: (item.method | default('GET') | upper) in ['GET', 'HEAD'] or (rbac_allow_write_checks | bool)
+  register: _b_allow
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "B | Record allow checks"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': item.item.id,
+           'title': item.item.desc,
+           'result': 'N/A' if (item is skipped) else ('Pass' if (item.status >= 200 and item.status < 300) else 'Fail'),
+           'actual': 'skipped: write checks disabled' if (item is skipped)
+                     else (item.item.method | default('GET') | upper) ~ ' ' ~ item.item.path ~ ' as ' ~ item.item.user ~ ' -> HTTP ' ~ item.status}] }}
+  loop: "{{ _b_allow.results }}"
+  loop_control:
+    label: "{{ item.item.id }}"
+
+- name: "D | Denied API calls are refused (server-side enforcement)"
+  ansible.builtin.uri:
+    url: "{{ rbac_dashboard_url }}{{ item.path }}"
+    method: "{{ item.method | default('GET') | upper }}"
+    headers:
+      Authorization: "Bearer {{ rbac_tokens[item.user].access_token }}"
+    body_format: json
+    body: "{{ item.body | default(omit) }}"
+    follow_redirects: none
+    validate_certs: "{{ rbac_validate_certs }}"
+    ca_path: "{{ rbac_ca_path if rbac_validate_certs else omit }}"
+  loop: "{{ rbac_api_deny_checks }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.user }} {{ item.method | default('GET') }} {{ item.path }}"
+  when: (item.method | default('GET') | upper) in ['GET', 'HEAD'] or (rbac_allow_write_checks | bool)
+  register: _d_deny
+  failed_when: false
+  no_log: "{{ rbac_no_log }}"
+
+- name: "D | Record deny checks"
+  ansible.builtin.set_fact:
+    rbac_results: >-
+      {{ rbac_results + [{
+           'id': item.item.id,
+           'title': item.item.desc,
+           'result': 'N/A' if (item is skipped) else ('Pass' if item.status in (item.item.expect | default(rbac_deny_status)) else 'Fail'),
+           'actual': 'skipped: write checks disabled' if (item is skipped)
+                     else (item.item.method | default('GET') | upper) ~ ' ' ~ item.item.path ~ ' as ' ~ item.item.user ~ ' -> HTTP ' ~ item.status}] }}
+  loop: "{{ _d_deny.results }}"
+  loop_control:
+    label: "{{ item.item.id }}"
